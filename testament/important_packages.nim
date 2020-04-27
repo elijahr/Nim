@@ -110,15 +110,8 @@ var packages*: seq[tuple[name, cmd: string; hasDeps: bool; url: string]] = @[]
 # pkg "zero_functional", false, "nim c -r test.nim"
 
 pkg "nitter", true, "nim c src/nitter.nim", "https://github.com/zedeus/nitter"
-pkg "mosdepth", true, "nim c -r mosdepth.nim", "https://github.com/brentp/mosdepth"
 pkg "fidget", true, "nim c -r tests/runNative.nim"
 pkg "nicy", false, "nim c -r src/nicy.nim"
-pkg "nimPDF", true
-pkg "reactor", true
-pkg "typography", true
-pkg "silvar", true, "nimble test", "https://github.com/brentp/slivar"
 pkg "websocket", false, "nim c websocket.nim"
-pkg "somalier", true, "nimble test", "https://github.com/brentp/somalier"
-pkg "rapid", true
 pkg "templates"
 pkg "pylib"
