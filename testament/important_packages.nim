@@ -68,6 +68,7 @@ var packages*: seq[tuple[name, cmd: string; hasDeps: bool; url: string]] = @[]
 # pkg "nimlsp", true
 # pkg "nimly", true
 # # pkg "nimongo", true, "nimble test_ci"
+# pkg "nimph", true, "nimble test", "https://github.com/disruptek/nimph"
 # pkg "nimpy", false, "nim c -r tests/nimfrompy.nim"
 # pkg "nimquery"
 # pkg "nimsl", true
@@ -114,10 +115,7 @@ var packages*: seq[tuple[name, cmd: string; hasDeps: bool; url: string]] = @[]
 # pkg "yaml"
 # pkg "zero_functional", false, "nim c -r test.nim"
 
-pkg "nimph", true, "nimble test", "https://github.com/disruptek/nimph"
-pkg "duphold", true, "nimble test", "https://github.com/brentp/duphold"
-pkg "httpauth", true
-pkg "neverwinter", false, "nimble test", "https://github.com/niv/neverwinter.nim"
-pkg "nimforum", true, "nimble test", "https://github.com/nim-lang/nimforum"
-pkg "nimwc", true, "nim c nimwc.nim"
-pkg "prologue", true
+# pkg "httpauth", true
+pkg "nimforum", true, "nim c -r src/forum.nim", "https://github.com/nim-lang/nimforum"
+# pkg "nimwc", true, "nim c nimwc.nim"
+pkg "prologue", true, "nim c -r tests/test_compile/test_compile.nim"
