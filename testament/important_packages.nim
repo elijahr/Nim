@@ -109,15 +109,11 @@ var packages*: seq[tuple[name, cmd: string; hasDeps: bool; url: string]] = @[]
 # pkg "yaml"
 # pkg "zero_functional", false, "nim c -r test.nim"
 
-pkg "vim_cubed", true, "nim c src/vim3.nim", "https://github.com/oakes/vim_cubed"
 pkg "nitter", true, "nim c src/nitter.nim", "https://github.com/zedeus/nitter"
-pkg "spry", true, "nim c src/spry.nim"
-pkg "nimtorch", true, "nimble test", "https://github.com/sinkingsugar/nimtorch"
-pkg "mosdepth", true, "nimble test", "https://github.com/brentp/mosdepth"
-pkg "laser"
+pkg "mosdepth", true, "nim c -r mosdepth.nim", "https://github.com/brentp/mosdepth"
 pkg "fidget", true, "nim c -r tests/runNative.nim"
 pkg "nicy", false, "nim c -r src/nicy.nim"
-pkg "nimpdf", true
+pkg "nimPDF", true
 pkg "reactor", true
 pkg "typography", true
 pkg "silvar", true, "nimble test", "https://github.com/brentp/slivar"
