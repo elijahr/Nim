@@ -635,3 +635,32 @@ block: # bug #18844
       var y: Zoomer
       doAssert x.memes.load == 0
       doAssert y.dopamine.memes.load == 0
+
+# Test distinct types work with atomics (should use lock-free path)
+block distinctTypes:
+  type
+    MyInt = distinct int
+    MyMyInt = distinct MyInt  # nested distinct
+    MyChar = distinct char
+
+  # Single-level distinct
+  var a: Atomic[MyInt]
+  a.store(MyInt(42))
+  doAssert int(a.load()) == 42
+  doAssert int(a.exchange(MyInt(100))) == 42
+  doAssert int(a.load()) == 100
+
+  # Nested distinct (2 levels)
+  var b: Atomic[MyMyInt]
+  b.store(MyMyInt(200))
+  doAssert int(MyInt(b.load())) == 200
+
+  # Distinct char
+  var c: Atomic[MyChar]
+  c.store(MyChar('Z'))
+  doAssert char(c.load()) == 'Z'
+
+  # Compare and exchange with distinct
+  var expected = MyInt(100)
+  doAssert a.compareExchange(expected, MyInt(150))
+  doAssert int(a.load()) == 150
