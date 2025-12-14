@@ -59,6 +59,15 @@ errors.
 
 [//]: # "Changes:"
 
+- `std/atomics` now determines lock-free eligibility based on `sizeof(T) <= sizeof(pointer)`
+  and `supportsCopyMem(T)` instead of a fixed type list. This means:
+  - Small objects and tuples (≤ pointer size) without managed memory now use lock-free atomics
+  - Distinct types wrapping primitives continue to work
+  - Added `isLockFree(T)` template to check at compile-time if a type uses lock-free operations
+  - Added `maxLockFreeSize` constant (equals `sizeof(pointer)`)
+  - Added `-d:nimEnforceLockFreeAtomics` flag to get compile errors instead of spinlock fallback
+  - With `--mm:atomicArc` or `--mm:none`, managed types like `ref` can also be lock-free
+
 - `std/math` The `^` symbol now supports floating-point as exponent in addition to the Natural type.
 - `min`, `max`, and `sequtils`' `minIndex`, `maxIndex` and `minmax` for `openArray`s now accept a comparison function.
 - `system.substr` implementation now uses `copymem` (wrapped C `memcpy`) for copying data, if available at compilation.
@@ -103,6 +112,10 @@ errors.
 
 ## Compiler changes
 
+- Concept matching now uses proper cycle detection instead of a depth limit.
+  Previously, nested concept matching beyond depth 1 would treat the concept
+  as `tyAnything` (accepting all types). Now recursive concepts like
+  `Trivial = concept x: x is Base or distinctBase(x) is Trivial` work correctly.
 
 ## Tool changes
 

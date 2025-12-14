@@ -3025,6 +3025,44 @@ If neither of them are subsets of one another, then the disambiguation proceeds 
 and the concept with the most definitions wins, if any. No definite winner is an ambiguity error at
 compile time.
 
+Recursive concepts
+------------------
+
+Concepts can reference themselves in their definitions, enabling recursive type constraints.
+This is useful for matching `distinct` types that should inherit traits from their base type:
+
+```nim
+import std/typetraits
+
+type
+  TrivialBase = SomeNumber | bool | ptr | pointer | enum
+
+  # Matches TrivialBase directly, or any distinct type whose base is Trivial
+  Trivial = concept x
+    x is TrivialBase or distinctBase(x) is Trivial
+
+  # Application: a handle type that should be treated as trivially copyable
+  Handle = distinct int
+  SpecialHandle = distinct Handle
+
+assert int is Trivial
+assert Handle is Trivial
+assert SpecialHandle is Trivial  # works through 2 levels
+assert not (string is Trivial)
+```
+
+Concepts can also be mutually recursive (co-dependent):
+
+```nim
+type
+  Serializable = concept
+    proc serialize(s: Self; writer: var Writer)
+  Writer = concept
+    proc write(w: var Self; data: Serializable)
+```
+
+The compiler uses cycle detection to handle these cases without infinite recursion.
+
 Statements and expressions
 ==========================
 

@@ -635,3 +635,78 @@ block: # bug #18844
       var y: Zoomer
       doAssert x.memes.load == 0
       doAssert y.dopamine.memes.load == 0
+
+# Test distinct types work with atomics (should use lock-free path)
+block distinctTypes:
+  type
+    MyInt = distinct int
+    MyMyInt = distinct MyInt  # nested distinct
+    MyChar = distinct char
+
+  # Single-level distinct
+  var a: Atomic[MyInt]
+  a.store(MyInt(42))
+  doAssert int(a.load()) == 42
+  doAssert int(a.exchange(MyInt(100))) == 42
+  doAssert int(a.load()) == 100
+
+  # Nested distinct (2 levels)
+  var b: Atomic[MyMyInt]
+  b.store(MyMyInt(200))
+  doAssert int(MyInt(b.load())) == 200
+
+  # Distinct char
+  var c: Atomic[MyChar]
+  c.store(MyChar('Z'))
+  doAssert char(c.load()) == 'Z'
+
+  # Compare and exchange with distinct
+  var expected = MyInt(100)
+  doAssert a.compareExchange(expected, MyInt(150))
+  doAssert int(a.load()) == 150
+
+# Test isLockFree for various types
+block isLockFreeTests:
+  # Primitives
+  doAssert isLockFree(int)
+
+  # Enums
+  type Color = enum red, green, blue
+  doAssert isLockFree(Color)
+
+  # Distinct of primitive
+  type MyInt = distinct int
+  doAssert isLockFree(MyInt)
+
+  # Small object (<= pointer size, no managed memory)
+  # Point is 8 bytes - lock-free on 64-bit, not on 32-bit
+  type Point = object
+    x, y: int32
+  doAssert isLockFree(Point) == (sizeof(Point) <= sizeof(pointer))
+
+  # Large type - NOT lock-free
+  type BigArray = array[100, int]
+  doAssert not isLockFree(BigArray)
+
+  # Managed types: string is 16 bytes (too large), ref is pointer-sized
+  doAssert not isLockFree(string)
+  when defined(gcAtomicArc) or defined(nogc):
+    doAssert isLockFree(ref int)
+  else:
+    doAssert not isLockFree(ref int)
+
+# Test small objects work with atomics (lock-free on 64-bit, spinlock on 32-bit)
+block smallObjectAtomics:
+  type Point = object
+    x, y: int32
+
+  var p: Atomic[Point]
+  p.store(Point(x: 10, y: 20))
+  doAssert p.load().x == 10
+
+  let old = p.exchange(Point(x: 30, y: 40))
+  doAssert old.x == 10
+
+  var expected = Point(x: 30, y: 40)
+  doAssert p.compareExchange(expected, Point(x: 50, y: 60))
+  doAssert p.load().x == 50
