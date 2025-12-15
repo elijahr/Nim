@@ -635,3 +635,158 @@ block: # bug #18844
       var y: Zoomer
       doAssert x.memes.load == 0
       doAssert y.dopamine.memes.load == 0
+
+# # Test distinct types work with atomics (should use lock-free path)
+# block distinctTypes:
+#   type
+#     MyInt = distinct int
+#     MyMyInt = distinct MyInt  # nested distinct
+#     MyChar = distinct char
+
+#   # Single-level distinct
+#   var a: Atomic[MyInt]
+#   a.store(MyInt(42))
+#   doAssert int(a.load()) == 42
+#   doAssert int(a.exchange(MyInt(100))) == 42
+#   doAssert int(a.load()) == 100
+
+#   # Nested distinct (2 levels)
+#   var b: Atomic[MyMyInt]
+#   b.store(MyMyInt(200))
+#   doAssert int(MyInt(b.load())) == 200
+
+#   # Distinct char
+#   var c: Atomic[MyChar]
+#   c.store(MyChar('Z'))
+#   doAssert char(c.load()) == 'Z'
+
+#   # Compare and exchange with distinct
+#   var expected = MyInt(100)
+#   doAssert a.compareExchange(expected, MyInt(150))
+#   doAssert int(a.load()) == 150
+
+# Test isLockFree for various types
+block isLockFreeTests:
+  # Primitives
+  doAssert isLockFree(int)
+
+  # Enums
+  type Color = enum red, green, blue
+  doAssert isLockFree(Color)
+
+  # Distinct of primitive
+  type MyInt = distinct int
+  doAssert isLockFree(MyInt)
+
+  # Small object (<= pointer size, no managed memory)
+  # Point is 8 bytes - lock-free on 64-bit, not on 32-bit
+  type Point = object
+    x, y: int32
+  doAssert isLockFree(Point) == (sizeof(Point) <= sizeof(pointer))
+
+  # Large type - NOT lock-free
+  type BigArray = array[100, int]
+  doAssert not isLockFree(BigArray)
+
+  # Managed types: lock-free eligibility depends on MM
+  # - Destructor MMs (arc/orc/atomicArc): supportsCopyMem is false, not lock-free
+  # - Non-destructor MMs (refc/markAndSweep/none): managed types are pointer-sized
+  when defined(gcdestructors):
+    # Destructor-based MMs: supportsCopyMem(T) must be true
+    doAssert not isLockFree(ref int)
+    doAssert not isLockFree(string)
+    doAssert not isLockFree(seq[int])
+  else:
+    # Non-destructor MMs: managed types are pointer-sized (8 bytes on 64-bit)
+    doAssert isLockFree(ref int)
+    doAssert isLockFree(string)
+    doAssert isLockFree(seq[int])
+
+# Test small objects work with atomics (lock-free on 64-bit, spinlock on 32-bit)
+block smallObjectAtomics:
+  type Point = object
+    x, y: int32
+
+  var p: Atomic[Point]
+  p.store(Point(x: 10, y: 20))
+  doAssert p.load().x == 10
+
+  let old = p.exchange(Point(x: 30, y: 40))
+  doAssert old.x == 10
+
+  var expected = Point(x: 30, y: 40)
+  doAssert p.compareExchange(expected, Point(x: 50, y: 60))
+  doAssert p.load().x == 50
+
+# Test types with different alignments
+block alignmentTests:
+  # Struct with natural alignment and padding (8 bytes total)
+  type Padded = object
+    a: int8   # 1 byte + 3 padding
+    b: int32  # 4 bytes
+
+  doAssert sizeof(Padded) == 8
+  doAssert isLockFree(Padded)
+
+  var padded: Atomic[Padded]
+  padded.store(Padded(a: 10, b: 20))
+  doAssert padded.load().a == 10
+  doAssert padded.load().b == 20
+
+  # Struct that exceeds pointer size due to alignment/padding
+  type TooBig = object
+    a: int64
+    b: int8  # 1 byte + 7 padding to maintain alignment
+
+  doAssert sizeof(TooBig) == 16
+  doAssert not isLockFree(TooBig)  # 16 bytes > 8 bytes
+
+  # TooBig uses spinlock fallback
+  var tooBig: Atomic[TooBig]
+  tooBig.store(TooBig(a: 100, b: 50))
+  doAssert tooBig.load().a == 100
+  doAssert tooBig.load().b == 50
+
+  # bycopy pragma (C interop) - same layout as C struct
+  type CStruct {.bycopy.} = object
+    x, y: int32
+
+  doAssert sizeof(CStruct) == 8
+  doAssert isLockFree(CStruct)
+
+  var cstruct: Atomic[CStruct]
+  cstruct.store(CStruct(x: 1, y: 2))
+  doAssert cstruct.load().x == 1
+
+  # Smaller aligned types (4 bytes)
+  type Small4 = object
+    a, b: int16
+
+  doAssert sizeof(Small4) == 4
+  doAssert isLockFree(Small4)
+
+  var small4: Atomic[Small4]
+  small4.store(Small4(a: 100, b: 200))
+  doAssert small4.load().a == 100
+
+  # 2-byte aligned type
+  type Small2 = object
+    a, b: int8
+
+  doAssert sizeof(Small2) == 2
+  doAssert isLockFree(Small2)
+
+  var small2: Atomic[Small2]
+  small2.store(Small2(a: 1, b: 2))
+  doAssert small2.load().a == 1
+
+  # 1-byte type
+  type Small1 = object
+    a: int8
+
+  doAssert sizeof(Small1) == 1
+  doAssert isLockFree(Small1)
+
+  var small1: Atomic[Small1]
+  small1.store(Small1(a: 42))
+  doAssert small1.load().a == 42
