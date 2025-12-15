@@ -107,9 +107,13 @@ tweeter_test.db
 # for `nim c -r nimdoc/tester` etc; this can be in multiple places
 htmldocs
 
+# Claude planning documents (ephemeral)
+docs/plans/
+
 ## these are not needed anymore unless checkout old older versions
 nimdoc.out.css
 # except here:
 !/nimdoc/testproject/expected/*
 pkgs/
 /compiler/compiler/
+/logs
