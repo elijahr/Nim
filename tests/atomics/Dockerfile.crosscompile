@@ -1,0 +1,49 @@
+# Cross-compilation Dockerfile for testing Nim atomics across architectures
+#
+# Uses amd64 with cross-compilers - much faster than QEMU emulation
+# We only need to COMPILE for each arch, not RUN (isLockFree is compile-time)
+
+FROM --platform=linux/amd64 debian:bookworm-slim
+
+# Install build dependencies and cross-compilers
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    curl \
+    xz-utils \
+    ca-certificates \
+    # Cross-compilers for various architectures
+    gcc-i686-linux-gnu \
+    gcc-aarch64-linux-gnu \
+    gcc-arm-linux-gnueabihf \
+    gcc-mips-linux-gnu \
+    gcc-mipsel-linux-gnu \
+    gcc-powerpc-linux-gnu \
+    gcc-riscv64-linux-gnu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build Nim from source using csources_v3 (required for current devel)
+# Note: csources build.sh auto-detects ../koch.nim and puts binary in ../bin/nim
+WORKDIR /nim
+RUN git clone https://github.com/nim-lang/Nim.git . && \
+    git clone --depth 1 https://github.com/nim-lang/csources_v3.git && \
+    cd csources_v3 && sh build.sh && cd .. && \
+    bin/nim c --noNimblePath --skipUserCfg --skipParentCfg koch && \
+    ./koch boot -d:release --skipUserCfg:on --skipParentCfg
+
+# --- Cached above, changes below ---
+
+# Copy our branch's changed files
+COPY compiler/semtypinst.nim /nim/compiler/semtypinst.nim
+COPY lib/pure/concurrency/atomics.nim /nim/lib/pure/concurrency/atomics.nim
+COPY tests/atomics/test_arch_matrix.nim /nim/tests/atomics/test_arch_matrix.nim
+COPY tests/atomics/cross_compile_test.sh /nim/tests/atomics/cross_compile_test.sh
+COPY tests/stdlib/concurrency/tatomics.nim /nim/tests/stdlib/concurrency/tatomics.nim
+
+# Build temp compiler with our fixes
+RUN ./koch temp -d:release
+
+# Make test script executable
+RUN chmod +x /nim/tests/atomics/cross_compile_test.sh
+
+CMD ["/nim/tests/atomics/cross_compile_test.sh"]

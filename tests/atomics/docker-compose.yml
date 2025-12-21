@@ -1,0 +1,13 @@
+version: '3.8'
+
+# Cross-compile atomics tests for multiple architectures
+# Uses native arch with cross-compilers - much faster than QEMU
+#
+# Usage from Nim root:
+#   docker compose -f tests/atomics/docker-compose.yml up --build
+
+services:
+  crosscompile:
+    build:
+      context: ../..
+      dockerfile: tests/atomics/Dockerfile.crosscompile
