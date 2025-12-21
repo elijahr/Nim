@@ -53,6 +53,73 @@ use `--mm:arc`. Notice that the default `async`:idx: implementation produces cyc
 and leaks memory with `--mm:arc`, in other words, for `async` you need to use `--mm:orc`.
 
 
+Atomic ARC: Lock-Free Reference Operations
+-------------------------------------------
+
+When using `--mm:atomicArc`, Nim provides low-level primitives for safe lock-free access
+to shared references. These primitives are necessary because with atomic reference counting,
+simply loading a reference from shared memory and then incrementing its refcount is not
+atomic - another thread could decrement the refcount to zero and destroy the object between
+the load and the increment, causing a use-after-free bug.
+
+atomicLoadAndRef
+~~~~~~~~~~~~~~~~
+
+.. code-block:: nim
+
+  proc atomicLoadAndRef*[T](location: ptr (ref T)): ref T
+
+Atomically loads a reference from a shared location and increments its reference count
+in a single logical operation. This prevents the use-after-free race condition that would
+occur with separate load and increment operations.
+
+**Returns:** The loaded reference, or `nil` if:
+
+- The location contains `nil`
+- The object is being concurrently destroyed (refcount reached zero)
+
+**Usage:**
+
+.. code-block:: nim
+
+  var sharedHead: ref Node  # Shared between threads
+
+  # Thread A: Safe load
+  let node = atomicLoadAndRef(addr sharedHead)
+  if node != nil:
+    use(node)
+    GC_unref(node)  # Release when done
+
+atomicStoreAndUnref
+~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: nim
+
+  proc atomicStoreAndUnref*[T](location: ptr (ref T), newValue: ref T)
+
+Atomically stores a new reference and properly manages the reference counts of both
+the new and old values.
+
+**Usage:**
+
+.. code-block:: nim
+
+  # Thread B: Safe store
+  let newNode = new(Node)
+  atomicStoreAndUnref(addr sharedHead, newNode)
+
+When to Use
+~~~~~~~~~~~
+
+Use these primitives when:
+
+- Building lock-free data structures (stacks, queues, lists)
+- Sharing `ref` objects between threads without locks
+- Implementing concurrent algorithms with managed memory
+
+**Important:** These are low-level primitives. Most applications should use higher-level
+abstractions like channels or thread-safe queues.
+
 
 Other MM modes
 --------------

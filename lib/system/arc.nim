@@ -272,4 +272,61 @@ when defined(gcDestructors):
         {.compilerRtl, inline, raises: [].} =
     result = cast[ptr PNimTypeV2](p).vTable[index]
 
+when defined(gcAtomicArc) and hasThreadSupport:
+  proc atomicLoadAndRef*[T](location: ptr (ref T)): ref T {.compilerRtl.} =
+    ## Atomically loads a reference and increments its refcount.
+    ## Returns nil if location points to nil or object is being destroyed.
+    ## This is the only safe way to load a ref from shared memory under --mm:atomicArc.
+    while true:
+      # Step 1: Load the pointer atomically
+      let p = atomicLoadN(cast[ptr pointer](location), ATOMIC_ACQUIRE)
+      if p == nil:
+        return nil
+
+      # Step 2: Get the refcount cell
+      let cell = head(p)
+
+      # Step 3: Try to increment the refcount using CAS
+      var currentRc = atomicLoadN(cell.rc.addr, ATOMIC_RELAXED)
+
+      # Loop until we increment or determine object is dead
+      # In Nim's ARC: rc >= 0 means object has at least 1 reference (alive)
+      # rc < 0 (specifically -rcIncrement) means object is being destroyed
+      while currentRc >= 0:
+        let newRc = currentRc +% rcIncrement
+
+        if atomicCompareExchangeN(cell.rc.addr, currentRc.addr, newRc,
+                                  false, ATOMIC_ACQUIRE, ATOMIC_RELAXED):
+          # Successfully incremented! Verify pointer hasn't changed
+          if atomicLoadN(cast[ptr pointer](location), ATOMIC_SEQ_CST) == p:
+            return cast[ref T](p)  # Success!
+          else:
+            # Pointer was swapped, undo our increment and retry
+            discard atomicDec(cell.rc, rcIncrement)
+            break  # Break inner loop, retry outer loop
+        # CAS failed, currentRc was updated by CAS, retry inner loop
+
+      # Inner loop exited: either object is dead (rc < 0) or pointer changed
+      # Check if pointer changed - if so, retry; if not, object is dead
+      if atomicLoadN(cast[ptr pointer](location), ATOMIC_ACQUIRE) == p:
+        return nil  # Same pointer but object is being destroyed
+
+  proc atomicStoreAndUnref*[T](location: ptr (ref T), newValue: ref T) {.compilerRtl.} =
+    ## Atomically stores a new reference and unrefs the old value.
+    ## Properly manages refcounts for both old and new values.
+
+    # Increment refcount of new value first (if not nil)
+    if newValue != nil:
+      increment head(cast[pointer](newValue))
+
+    # Atomically swap the pointer
+    let oldPtr = atomicExchangeN(cast[ptr pointer](location),
+                                  cast[pointer](newValue), ATOMIC_ACQ_REL)
+
+    # Decrement refcount of old value (if not nil)
+    if oldPtr != nil:
+      if nimDecRefIsLast(oldPtr):
+        # Free the memory (destructor already called by `=destroy` if needed)
+        nimRawDispose(oldPtr, T.alignOf)
+
 {.pop.} # raises: []
