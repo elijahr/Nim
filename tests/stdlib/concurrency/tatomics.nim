@@ -8,6 +8,10 @@ discard """
 
 import std/atomics
 import std/assertions
+import std/monotimes
+import std/times
+import std/os
+import std/typedthreads
 
 
 # =============================================================================
@@ -292,18 +296,20 @@ block sixteenByteTypes:
   doAssert s.load.a == 100
   doAssert s.load.b == 200
 
-block bigObjects:
-  # >16 bytes - never lock-free, uses spinlock fallback
-  type Size32 = object
-    a, b, c, d: int64
-  doAssert sizeof(Size32) == 32
-  doAssert not isLockFree(Size32)
+when defined(nimAllowAtomicFallback):
+  block bigObjects:
+    # >16 bytes - never lock-free, uses spinlock fallback
+    # This test requires -d:nimAllowAtomicFallback
+    type Size32 = object
+      a, b, c, d: int64
+    doAssert sizeof(Size32) == 32
+    doAssert not isLockFree(Size32)
 
-  # But it still works (via spinlock)
-  var big: Atomic[Size32]
-  big.store(Size32(a: 1, b: 2, c: 3, d: 4))
-  doAssert big.load.a == 1
-  doAssert big.load.d == 4
+    # But it still works (via spinlock)
+    var big: Atomic[Size32]
+    big.store(Size32(a: 1, b: 2, c: 3, d: 4))
+    doAssert big.load.a == 1
+    doAssert big.load.d == 4
 
 block invalidSizes:
   # Sizes 3, 5, 6, 7 are NOT lock-free
@@ -630,3 +636,198 @@ block enumLockFree:
   # Medium enums (>256 values) should be 2 bytes and lock-free
   doAssert sizeof(MediumEnum) == 2
   doAssert isLockFree(MediumEnum)
+
+# =============================================================================
+# Wait/Notify Tests
+# =============================================================================
+# Note: wait/notify requires OS support and has size restrictions:
+# - Linux/FreeBSD/OpenBSD: 4 bytes only
+# - Windows: 1, 2, 4, or 8 bytes
+# - Darwin: 4 or 8 bytes
+# Tests use int32 (4 bytes) for cross-platform compatibility.
+
+block waitNotifyBasic:
+  # Test basic wait/notify with single thread (value changes immediately)
+  var a: Atomic[int32]
+  a.store(0)
+
+  # Change value before wait, so wait should return immediately
+  a.store(1)
+  a.wait(0)  # Should not block since value is already 1
+  doAssert a.load == 1
+
+block waitWithTimeout:
+  # Test wait with timeout when value doesn't change
+  var a: Atomic[int32]
+  a.store(42)
+
+  # Wait should timeout since value stays at 42
+  let start = getMonoTime()
+  let woken = a.wait(42'i32, initDuration(milliseconds = 50))
+  let elapsed = (getMonoTime() - start).inMilliseconds
+
+  doAssert not woken, "Should timeout when value doesn't change"
+  doAssert elapsed >= 40, "Should wait at least 40ms"
+  doAssert a.load == 42
+
+block waitWithImmediateChange:
+  # Test wait with timeout when value changes before timeout
+  var a: Atomic[int32]
+  a.store(0)
+
+  # Change value immediately, wait should return true
+  a.store(1)
+  let woken = a.wait(0'i32, initDuration(seconds = 10))
+  doAssert woken, "Should be woken when value changes"
+  doAssert a.load == 1
+
+block notifyOneNoWaiters:
+  # Test notifyOne when no threads are waiting (should be no-op)
+  var a: Atomic[int32]
+  a.store(99)
+  a.notifyOne()  # Should not crash
+  doAssert a.load == 99
+
+block notifyAllNoWaiters:
+  # Test notifyAll when no threads are waiting (should be no-op)
+  var a: Atomic[int32]
+  a.store(88)
+  a.notifyAll()  # Should not crash
+  doAssert a.load == 88
+
+block waitNotifyThreaded:
+  # Test wait/notify with actual threading
+  type
+    ThreadData = object
+      atomic: ptr Atomic[int32]
+      ready: bool
+
+  proc waiterThread(arg: ThreadData) {.thread.} =
+    var data = arg
+    data.ready = true
+    data.atomic[].wait(0)  # Wait until value changes from 0
+
+  var a: Atomic[int32]
+  a.store(0)
+
+  var thr: Thread[ThreadData]
+  var data = ThreadData(atomic: addr a, ready: false)
+  createThread(thr, waiterThread, data)
+
+  # Give thread time to start waiting
+  sleep(100)
+
+  # Change value and notify
+  a.store(1)
+  a.notifyOne()
+
+  joinThread(thr)
+  doAssert a.load == 1
+
+block waitNotifyMultipleThreads:
+  # Test notifyAll wakes multiple threads
+  const NumThreads = 3
+
+  type
+    ThreadData = object
+      atomic: ptr Atomic[int32]
+      threadId: int32
+      wokenCount: ptr Atomic[int32]
+
+  proc waiterThread(arg: ThreadData) {.thread.} =
+    var data = arg
+    data.atomic[].wait(0)
+    data.wokenCount[].atomicInc(1)
+
+  var a: Atomic[int32]
+  var wokenCount: Atomic[int32]
+  a.store(0)
+  wokenCount.store(0)
+
+  var threads: array[NumThreads, Thread[ThreadData]]
+  for i in 0 ..< NumThreads:
+    var data = ThreadData(
+      atomic: addr a,
+      threadId: int32(i),
+      wokenCount: addr wokenCount
+    )
+    createThread(threads[i], waiterThread, data)
+
+  # Give threads time to start waiting
+  sleep(100)
+
+  # Wake all threads
+  a.store(1)
+  a.notifyAll()
+
+  for i in 0 ..< NumThreads:
+    joinThread(threads[i])
+
+  doAssert wokenCount.load == NumThreads, "All threads should be woken"
+
+block waitNotifyDifferentTypes:
+  # Test wait/notify with different atomic types
+  # int32 works on all platforms
+  var a32: Atomic[int32]
+  a32.store(0)
+  a32.store(1)
+  a32.wait(0)
+  doAssert a32.load == 1
+  a32.notifyOne()
+
+  # int64/uint64 only works on Darwin and Windows
+  when defined(macosx) or defined(ios) or defined(tvos) or defined(watchos) or defined(windows):
+    var a64: Atomic[int64]
+    a64.store(0)
+    a64.store(1)
+    a64.wait(0)
+    doAssert a64.load == 1
+    a64.notifyOne()
+
+  # bool (1 byte) only works on Windows
+  when defined(windows):
+    var aBool: Atomic[bool]
+    aBool.store(false)
+    aBool.store(true)
+    aBool.wait(false)
+    doAssert aBool.load == true
+    aBool.notifyOne()
+
+block waitNotifyProducerConsumer:
+  # Producer-consumer pattern using wait/notify
+  # Uses int32 for cross-platform compatibility
+  type
+    SharedData = object
+      value: Atomic[int32]
+      ready: Atomic[int32]  # 0 = not ready, 1 = ready
+
+  proc producer(data: ptr SharedData) {.thread.} =
+    for i in 1'i32 .. 5'i32:
+      sleep(10)
+      data[].value.store(i)
+      data[].ready.store(1)
+      data[].ready.notifyOne()
+
+  proc consumer(data: ptr SharedData) {.thread.} =
+    for i in 1'i32 .. 5'i32:
+      while data[].ready.load == 0:
+        discard data[].ready.wait(0, initDuration(milliseconds = 100))
+
+      let val = data[].value.load
+      doAssert val == i, "Expected " & $i & " but got " & $val
+      data[].ready.store(0)
+
+  var shared: SharedData
+  shared.value.store(0)
+  shared.ready.store(0)
+
+  var prod, cons: Thread[ptr SharedData]
+  createThread(prod, producer, addr shared)
+  createThread(cons, consumer, addr shared)
+
+  joinThread(prod)
+  joinThread(cons)
+
+  doAssert shared.value.load == 5
+
+echo "All wait/notify tests passed!"

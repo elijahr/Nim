@@ -74,6 +74,9 @@ errors.
     uses C++'s generic `std::atomic<T>` with C++ internal locking for non-lock-free types
   - `fetchAdd`, `fetchSub`, `fetchAnd`, `fetchOr`, `fetchXor`, `atomicInc`, `atomicDec`, `+=`, `-=`
     now accept `char` and `enum` in addition to integer types (via new `SomeAtomicInt` type class)
+  - Added `wait`, `notifyOne`, `notifyAll` for efficient thread synchronization using
+    platform-native blocking primitives: Linux/FreeBSD/OpenBSD (4 bytes), Windows (1-8 bytes),
+    Darwin (4-8 bytes). Unsupported sizes cause compile-time errors (no spin-wait fallback)
 
 - `std/math` The `^` symbol now supports floating-point as exponent in addition to the Natural type.
 - `min`, `max`, and `sequtils`' `minIndex`, `maxIndex` and `minmax` for `openArray`s now accept a comparison function.

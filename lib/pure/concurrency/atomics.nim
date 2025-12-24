@@ -41,16 +41,14 @@
 ## - ARM64 (LDXP/STXP; full 128-bit atomicity requires ARMv8.4+)
 ## - Use `-d:nimNoLockFree16` to disable for old x86-64 CPUs without CMPXCHG16B
 ##
-## Use `T.isLockFree` to check at compile-time whether a type uses lock-free
-## operations. By default, non-lock-free types cause a compile error. To allow
-## fallback (spinlock or C++ internal locking), compile with `-d:nimAllowAtomicFallback`.
+## Use `isLockFree(T)` or the `LockFree` concept to check at compile-time whether
+## a type uses lock-free operations. Non-lock-free types are rejected at compile time.
 ##
 ## C++ Backend
 ## -----------
 ## By default, lock-free types use fixed-size C++ atomic integers
-## (`std::atomic<int8>`, etc.); non-lock-free types use a Nim spinlock.
-## To use C++'s generic `std::atomic<T>` (with C++ internal locking for
-## non-lock-free types), compile with `-d:nimUseCppAtomics`.
+## (`std::atomic<int8>`, etc.). To use C++'s generic `std::atomic<T>`,
+## compile with `-d:nimUseCppAtomics`.
 ##
 ## Safety with Managed Types
 ## -------------------------
@@ -81,16 +79,6 @@ type
     ## Types that support atomic arithmetic and bitwise operations.
     ## Includes all integer types, `char`, and `enum` (all integral types in C/C++).
 
-template isManaged(T: typedesc): bool =
-  ## Returns `true` if `T` contains managed memory that prevents lock-free atomics.
-  ## With non-destructor MMs (refc, markAndSweep, none), managed types like
-  ## `ref`, `string`, `seq` are pointer-sized and can be atomically swapped.
-  ## With destructor-based MMs (arc, orc, atomicArc), `supportsCopyMem` determines this.
-  when defined(gcdestructors):
-    not supportsCopyMem(T)
-  else:
-    false  # Non-destructor MMs: managed types are pointer-sized
-
 const
   hasLockFree8* = sizeof(pointer) >= 8 or  # All 64-bit architectures
                   defined(i386) or          # x86-32 has CMPXCHG8B
@@ -115,6 +103,27 @@ const
     ##
     ## Use `-d:nimNoLockFree16` to disable for old x86-64 CPUs without CMPXCHG16B.
 
+# Concept for types that can use lock-free hardware atomics.
+# Used as proc constraint `[T: LockFree]` to restrict atomic operations to lock-free types.
+when defined(gcdestructors):
+  type LockFree* = concept type T
+    (sizeof(T) == 1 or sizeof(T) == 2 or sizeof(T) == 4 or
+     (sizeof(T) == 8 and hasLockFree8) or
+     (sizeof(T) == 16 and hasLockFree16)) and
+    supportsCopyMem(T)
+else:
+  type LockFree* = concept type T
+    sizeof(T) == 1 or sizeof(T) == 2 or sizeof(T) == 4 or
+    (sizeof(T) == 8 and hasLockFree8) or
+    (sizeof(T) == 16 and hasLockFree16)
+
+template isManaged(T: typedesc): bool =
+  # Returns `true` if `T` contains managed memory that prevents lock-free atomics.
+  when defined(gcdestructors):
+    not supportsCopyMem(T)
+  else:
+    false
+
 template isLockFree*(T: typedesc): bool =
   ## Returns `true` if `Atomic[T]` uses lock-free hardware atomics,
   ## `false` if it falls back to a spinlock.
@@ -123,26 +132,10 @@ template isLockFree*(T: typedesc): bool =
   ## - `sizeof(T)` must be 1, 2, 4, 8, or 16 bytes
   ## - 8-byte requires `hasLockFree8`
   ## - 16-byte requires `hasLockFree16`
-  ## - `supportsCopyMem(T)` (no managed memory) for destructor-based MMs (arc/orc/atomicArc)
-  ## - For non-destructor MMs (refc/none/etc), managed types are pointer-sized and qualify
+  ## - `supportsCopyMem(T)` (no managed memory) for destructor-based MMs
   (sizeof(T) == 1 or sizeof(T) == 2 or sizeof(T) == 4 or
    (sizeof(T) == 8 and hasLockFree8) or
    (sizeof(T) == 16 and hasLockFree16)) and not isManaged(T)
-
-template enforceLockFreeCheck(T: typedesc) =
-  ## Internal template to emit compile-time error when type cannot use lock-free
-  ## atomics, unless `-d:nimAllowAtomicFallback` is defined to allow fallback.
-  when not defined(nimAllowAtomicFallback):
-    when not (sizeof(T) == 1 or sizeof(T) == 2 or sizeof(T) == 4 or
-              (sizeof(T) == 8 and hasLockFree8) or
-              (sizeof(T) == 16 and hasLockFree16)):
-      {.error: "Atomic[" & $T & "] cannot use lock-free atomics: sizeof(" & $T & ") = " &
-               $sizeof(T) & " is not a valid atomic size. " &
-               "Use -d:nimAllowAtomicFallback to allow fallback.".}
-    elif isManaged(T):
-      {.error: "Atomic[" & $T & "] cannot use lock-free atomics: type contains managed memory " &
-               "and cannot be safely copied with this memory manager. " &
-               "Use -d:nimAllowAtomicFallback to allow fallback.".}
 
 runnableExamples:
   # Check lock-free status at compile time
@@ -195,6 +188,192 @@ runnableExamples:
   assert flag.testAndSet
   flag.clear(moRelaxed)
   assert not flag.testAndSet
+
+# Wait/Notify Implementation
+# ===========================
+# Platform-specific blocking primitives
+
+import std/times
+
+const
+  hasDarwinUlock = defined(macosx) or defined(ios) or defined(tvos) or defined(watchos)
+    ## True when Darwin __ulock_wait/__ulock_wake syscalls are available.
+    ## Supports 32 and 64-bit atomics.
+
+# Concept for types that support wait/notify operations.
+# Size requirements vary by platform:
+# - Linux/FreeBSD/OpenBSD: 4 bytes only (futex)
+# - Windows: 1, 2, 4, or 8 bytes (WaitOnAddress)
+# - Darwin: 4 or 8 bytes (ulock)
+when defined(linux) or defined(freebsd) or defined(openbsd):
+  type Waitable* = concept type T
+    sizeof(T) == 4
+elif defined(windows):
+  type Waitable* = concept type T
+    sizeof(T) in {1, 2, 4, 8}
+elif hasDarwinUlock:
+  type Waitable* = concept type T
+    sizeof(T) in {4, 8}
+else:
+  type Waitable* = concept type T
+    false  # Unsupported platform
+
+# Platform-specific wait/notify implementations
+when defined(linux):
+  type Timespec {.importc: "struct timespec", header: "<time.h>", final, pure, completeStruct.} = object
+    tv_sec: int
+    tv_nsec: int
+
+  const
+    FUTEX_WAIT_PRIVATE = 128
+    FUTEX_WAKE_PRIVATE = 129
+
+  when defined(amd64):
+    proc syscall(number: clong): clong {.importc, header: "<unistd.h>", varargs.}
+    const SYS_futex = 202
+  elif defined(i386):
+    proc syscall(number: clong): clong {.importc, header: "<unistd.h>", varargs.}
+    const SYS_futex = 240
+  elif defined(arm):
+    proc syscall(number: clong): clong {.importc, header: "<unistd.h>", varargs.}
+    const SYS_futex = 240
+  elif defined(arm64):
+    proc syscall(number: clong): clong {.importc, header: "<unistd.h>", varargs.}
+    const SYS_futex = 98
+  else:
+    proc syscall(number: clong): clong {.importc, header: "<unistd.h>", varargs.}
+    var SYS_futex {.importc: "SYS_futex", header: "<sys/syscall.h>".}: clong
+
+  proc futexWait(address: ptr int32, expected: int32, timeoutUs: int = -1): bool =
+    ## Returns true if woken by notify, false on timeout or spurious wakeup.
+    var ts: Timespec
+    var tsPtr: pointer = nil
+    if timeoutUs >= 0:
+      ts.tv_sec = timeoutUs div 1_000_000
+      ts.tv_nsec = (timeoutUs mod 1_000_000) * 1000
+      tsPtr = addr ts
+    let res = syscall(SYS_futex, address, FUTEX_WAIT_PRIVATE, expected.clong, tsPtr)
+    result = res == 0 or res == -1
+
+  proc futexWakeOne(address: ptr int32) =
+    discard syscall(SYS_futex, address, FUTEX_WAKE_PRIVATE, 1.clong)
+
+  proc futexWakeAll(address: ptr int32) =
+    discard syscall(SYS_futex, address, FUTEX_WAKE_PRIVATE, high(clong))
+
+when defined(windows):
+  # Link synchronization library for MinGW; VCC links Windows SDK automatically
+  when not defined(vcc):
+    {.passL: "-lsynchronization".}
+
+  proc WaitOnAddress(address: pointer, compareAddress: pointer,
+                     addressSize: csize_t, dwMilliseconds: int32): int32
+                     {.importc, header: "<synchapi.h>", stdcall.}
+  proc WakeByAddressSingle(address: pointer)
+                           {.importc, header: "<synchapi.h>", stdcall.}
+  proc WakeByAddressAll(address: pointer)
+                        {.importc, header: "<synchapi.h>", stdcall.}
+
+  const INFINITE = -1'i32
+
+  proc windowsWait[T](address: ptr T, expected: T, timeoutUs: int = -1): bool =
+    var exp = expected
+    let ms = if timeoutUs < 0: INFINITE else: int32(timeoutUs div 1000)
+    result = WaitOnAddress(address, addr exp, csize_t(sizeof(T)), ms) != 0
+
+when hasDarwinUlock:
+  const
+    UL_COMPARE_AND_WAIT = 1'u32
+    ULF_WAKE_ALL = 0x00000100'u32
+
+  proc ulockWait(operation: uint32, address: pointer, value: uint64,
+                 timeout: uint32): cint {.importc: "__ulock_wait", dynlib: "libSystem.B.dylib".}
+  proc ulockWake(operation: uint32, address: pointer,
+                 wake_value: uint64): cint {.importc: "__ulock_wake", dynlib: "libSystem.B.dylib".}
+
+  proc darwinWait32(address: ptr uint32, expected: uint32, timeoutUs: int = -1): bool =
+    let timeout = if timeoutUs < 0: 0'u32 else: uint32(timeoutUs)
+    let res = ulockWait(UL_COMPARE_AND_WAIT, address, expected.uint64, timeout)
+    result = res == 0
+
+  proc darwinWait64(address: ptr uint64, expected: uint64, timeoutUs: int = -1): bool =
+    let timeout = if timeoutUs < 0: 0'u32 else: uint32(timeoutUs)
+    let res = ulockWait(UL_COMPARE_AND_WAIT, address, expected, timeout)
+    result = res == 0
+
+  proc darwinWakeOne(address: pointer) =
+    discard ulockWake(UL_COMPARE_AND_WAIT, address, 0)
+
+  proc darwinWakeAll(address: pointer) =
+    while ulockWake(UL_COMPARE_AND_WAIT or ULF_WAKE_ALL, address, 0) >= 0:
+      discard
+
+when defined(freebsd):
+  # FreeBSD _umtx_op - supports 32-bit atomics
+  type Timespec {.importc: "struct timespec", header: "<time.h>", final, pure, completeStruct.} = object
+    tv_sec: int
+    tv_nsec: int
+
+  const
+    UMTX_OP_WAIT_UINT_PRIVATE = 15  # Wait on 32-bit value (process-private)
+    UMTX_OP_WAKE_PRIVATE = 16       # Wake waiters (process-private)
+
+  type UmtxTime {.importc: "struct _umtx_time", header: "<sys/umtx.h>", final, pure.} = object
+    timeout: Timespec
+    flags: uint32
+    clockid: uint32
+
+  proc umtxOp(obj: pointer, op: cint, val: culong, uaddr: pointer,
+              uaddr2: pointer): cint {.importc: "_umtx_op", header: "<sys/umtx.h>".}
+
+  proc freebsdWait(address: ptr uint32, expected: uint32, timeoutUs: int = -1): bool =
+    if timeoutUs < 0:
+      let res = umtxOp(address, UMTX_OP_WAIT_UINT_PRIVATE, expected.culong, nil, nil)
+      result = res == 0 or res == -1
+    else:
+      var ut: UmtxTime
+      ut.timeout.tv_sec = timeoutUs div 1_000_000
+      ut.timeout.tv_nsec = (timeoutUs mod 1_000_000) * 1000
+      ut.flags = 0
+      ut.clockid = 0  # CLOCK_REALTIME
+      let res = umtxOp(address, UMTX_OP_WAIT_UINT_PRIVATE, expected.culong,
+                       cast[pointer](sizeof(UmtxTime)), addr ut)
+      result = res == 0 or res == -1
+
+  proc freebsdWakeOne(address: ptr uint32) =
+    discard umtxOp(address, UMTX_OP_WAKE_PRIVATE, 1, nil, nil)
+
+  proc freebsdWakeAll(address: ptr uint32) =
+    discard umtxOp(address, UMTX_OP_WAKE_PRIVATE, high(culong), nil, nil)
+
+when defined(openbsd):
+  # OpenBSD futex - supports 32-bit atomics (added in OpenBSD 6.2)
+  type Timespec {.importc: "struct timespec", header: "<time.h>", final, pure, completeStruct.} = object
+    tv_sec: int
+    tv_nsec: int
+
+  const
+    FUTEX_WAIT = 1
+    FUTEX_WAKE = 2
+
+  proc futex(uaddr: pointer, op: cint, val: cint, timeout: pointer,
+             uaddr2: pointer): cint {.importc, header: "<sys/futex.h>".}
+
+  proc openbsdWait(address: ptr int32, expected: int32, timeoutUs: int = -1): bool =
+    var ts: Timespec
+    var tsPtr: pointer = nil
+    if timeoutUs >= 0:
+      ts.tv_sec = timeoutUs div 1_000_000
+      ts.tv_nsec = (timeoutUs mod 1_000_000) * 1000
+      tsPtr = addr ts
+    let res = futex(address, FUTEX_WAIT, expected.cint, tsPtr, nil)
+    result = res == 0 or res == -1
+
+  proc openbsdWakeOne(address: ptr int32) =
+    discard futex(address, FUTEX_WAKE, 1, nil, nil)
+
+  proc openbsdWakeAll(address: ptr int32) =
+    discard futex(address, FUTEX_WAKE, high(cint), nil, nil)
 
 when (defined(cpp) and defined(nimUseCppAtomics)) or defined(nimdoc):
   # For the C++ backend, types and operations map directly to C++11 atomics.
@@ -251,15 +430,13 @@ when (defined(cpp) and defined(nimUseCppAtomics)) or defined(nimdoc):
   proc loadImpl[T](location: var Atomic[T]; order: MemoryOrder): T {.importcpp: "#.load(@)", inline.}
   proc storeImpl[T](location: var Atomic[T]; desired: T; order: MemoryOrder) {.importcpp: "#.store(@)", inline.}
 
-  proc load*[T](location: var Atomic[T]; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
+  proc load*[T: LockFree](location: var Atomic[T]; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
     ## Atomically obtains the value of the atomic object.
-    enforceLockFreeCheck(T)
     loadImpl(location, order)
 
-  proc store*[T](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent) {.inline.} =
+  proc store*[T: LockFree](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent) {.inline.} =
     ## Atomically replaces the value of the atomic object with the `desired`
     ## value.
-    enforceLockFreeCheck(T)
     storeImpl(location, desired, order)
 
   proc exchangeImpl[T](location: var Atomic[T]; desired: T; order: MemoryOrder): T {.importcpp: "#.exchange(@)", inline.}
@@ -268,34 +445,29 @@ when (defined(cpp) and defined(nimUseCppAtomics)) or defined(nimdoc):
   proc compareExchangeWeakImpl[T](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder): bool {.importcpp: "#.compare_exchange_weak(@)", inline.}
   proc compareExchangeWeakImpl[T](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.importcpp: "#.compare_exchange_weak(@)", inline.}
 
-  proc exchange*[T](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
+  proc exchange*[T: LockFree](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
     ## Atomically replaces the value of the atomic object with the `desired`
     ## value and returns the old value.
-    enforceLockFreeCheck(T)
     exchangeImpl(location, desired, order)
 
-  proc compareExchange*[T](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
+  proc compareExchange*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
     ## Atomically compares the value of the atomic object with the `expected`
     ## value and performs exchange with the `desired` one if equal or load if
     ## not. Returns true if the exchange was successful.
-    enforceLockFreeCheck(T)
     compareExchangeImpl(location, expected, desired, order)
 
-  proc compareExchange*[T](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
+  proc compareExchange*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
     ## Same as above, but allows for different memory orders for success and
     ## failure.
-    enforceLockFreeCheck(T)
     compareExchangeImpl(location, expected, desired, success, failure)
 
-  proc compareExchangeWeak*[T](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
+  proc compareExchangeWeak*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
     ## Same as above, but is allowed to fail spuriously.
-    enforceLockFreeCheck(T)
     compareExchangeWeakImpl(location, expected, desired, order)
 
-  proc compareExchangeWeak*[T](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
+  proc compareExchangeWeak*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
     ## Same as above, but allows for different memory orders for success and
     ## failure.
-    enforceLockFreeCheck(T)
     compareExchangeWeakImpl(location, expected, desired, success, failure)
 
   # Numerical operations
@@ -371,11 +543,7 @@ else:
       AtomicFlag* = distinct int8
 
       Atomic*[T] = object
-        when T.isLockFree:
-          value: T.nonAtomicType
-        else:
-          nonAtomicValue: T
-          guard: AtomicFlag
+        value: T.nonAtomicType
 
     {.push header: "<intrin.h>".}
 
@@ -423,58 +591,25 @@ else:
     proc clear*(location: var AtomicFlag; order: MemoryOrder = moSequentiallyConsistent) =
       discard interlockedAnd(addr(location), 0'i8)
 
-    template withLockVcc[T](location: var Atomic[T]; order: MemoryOrder; body: untyped): untyped =
-      while interlockedOr(addr(location.guard), 1'i8) == 1'i8: discard
-      try:
-        body
-      finally:
-        discard interlockedAnd(addr(location.guard), 0'i8)
+    proc load*[T: LockFree](location: var Atomic[T]; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
+      cast[T](interlockedOr(addr(location.value), (nonAtomicType(T))0))
 
-    proc load*[T](location: var Atomic[T]; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
-      enforceLockFreeCheck(T)
-      when T.isLockFree:
-        cast[T](interlockedOr(addr(location.value), (nonAtomicType(T))0))
-      else:
-        withLockVcc(location, order):
-          result = location.nonAtomicValue
+    proc store*[T: LockFree](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent) {.inline.} =
+      discard interlockedExchange(addr(location.value), cast[nonAtomicType(T)](desired))
 
-    proc store*[T](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent) {.inline.} =
-      enforceLockFreeCheck(T)
-      when T.isLockFree:
-        discard interlockedExchange(addr(location.value), cast[nonAtomicType(T)](desired))
-      else:
-        withLockVcc(location, order):
-          location.nonAtomicValue = desired
+    proc exchange*[T: LockFree](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
+      cast[T](interlockedExchange(addr(location.value), cast[int64](desired)))
 
-    proc exchange*[T](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
-      enforceLockFreeCheck(T)
-      when T.isLockFree:
-        cast[T](interlockedExchange(addr(location.value), cast[int64](desired)))
-      else:
-        withLockVcc(location, order):
-          result = location.nonAtomicValue
-          location.nonAtomicValue = desired
+    proc compareExchange*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
+      cast[T](interlockedCompareExchange(addr(location.value), cast[nonAtomicType(T)](desired), cast[nonAtomicType(T)](expected))) == expected
 
-    proc compareExchange*[T](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
-      enforceLockFreeCheck(T)
-      when T.isLockFree:
-        cast[T](interlockedCompareExchange(addr(location.value), cast[nonAtomicType(T)](desired), cast[nonAtomicType(T)](expected))) == expected
-      else:
-        withLockVcc(location, success):
-          if location.nonAtomicValue != expected:
-            expected = location.nonAtomicValue
-            return false
-          expected = desired
-          swap(location.nonAtomicValue, expected)
-          return true
-
-    proc compareExchange*[T](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
+    proc compareExchange*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
       compareExchange(location, expected, desired, order, order)
 
-    proc compareExchangeWeak*[T](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
+    proc compareExchangeWeak*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
       compareExchange(location, expected, desired, success, failure)
 
-    proc compareExchangeWeak*[T](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
+    proc compareExchangeWeak*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
       compareExchangeWeak(location, expected, desired, order, order)
 
     proc fetchAdd*[T: SomeAtomicInt](location: var Atomic[T]; value: T; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
@@ -537,16 +672,12 @@ else:
       AtomicFlag* {.importc: "atomic_flag".maybeWrapStd, size: 1.} = object
 
       Atomic*[T] = object
-        when T.isLockFree:
-          # Maps the size of a lock-free type to its internal atomic type
-          when sizeof(T) == 1: value: AtomicInt8
-          elif sizeof(T) == 2: value: AtomicInt16
-          elif sizeof(T) == 4: value: AtomicInt32
-          elif sizeof(T) == 8: value: AtomicInt64
-          elif sizeof(T) == 16: value: AtomicInt128
-        else:
-          nonAtomicValue: T
-          guard: AtomicFlag
+        # Maps the size of a lock-free type to its internal atomic type
+        when sizeof(T) == 1: value: AtomicInt8
+        elif sizeof(T) == 2: value: AtomicInt16
+        elif sizeof(T) == 4: value: AtomicInt32
+        elif sizeof(T) == 8: value: AtomicInt64
+        elif sizeof(T) == 16: value: AtomicInt128
 
     #proc init*[T](location: var Atomic[T]; value: T): T {.importcpp: "atomic_init(@)".}
     proc atomic_load_explicit[T, A](location: ptr A; order: MemoryOrder): T {.importc: "atomic_load_explicit".maybeWrapStd.}
@@ -573,63 +704,25 @@ else:
 
     {.pop.}
 
-    template withLock[T](location: var Atomic[T]; order: MemoryOrder; body: untyped): untyped =
-      ## Helper template to execute `body` with the spinlock acquired.
-      while testAndSet(location.guard, moAcquire): discard
-      try:
-        body
-      finally:
-        clear(location.guard, moRelease)
+    proc load*[T: LockFree](location: var Atomic[T]; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
+      cast[T](atomic_load_explicit[nonAtomicType(T), typeof(location.value)](addr(location.value), order))
 
-    proc load*[T](location: var Atomic[T]; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
-      enforceLockFreeCheck(T)
-      when T.isLockFree:
-        cast[T](atomic_load_explicit[nonAtomicType(T), typeof(location.value)](addr(location.value), order))
-      else:
-        withLock(location, order):
-          result = location.nonAtomicValue
+    proc store*[T: LockFree](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent) {.inline.} =
+      atomic_store_explicit(addr(location.value), cast[nonAtomicType(T)](desired), order)
 
-    proc store*[T](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent) {.inline.} =
-      enforceLockFreeCheck(T)
-      when T.isLockFree:
-        atomic_store_explicit(addr(location.value), cast[nonAtomicType(T)](desired), order)
-      else:
-        withLock(location, order):
-          location.nonAtomicValue = desired
+    proc exchange*[T: LockFree](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
+      cast[T](atomic_exchange_explicit(addr(location.value), cast[nonAtomicType(T)](desired), order))
 
-    proc exchange*[T](location: var Atomic[T]; desired: T; order: MemoryOrder = moSequentiallyConsistent): T {.inline.} =
-      enforceLockFreeCheck(T)
-      when T.isLockFree:
-        cast[T](atomic_exchange_explicit(addr(location.value), cast[nonAtomicType(T)](desired), order))
-      else:
-        withLock(location, order):
-          result = location.nonAtomicValue
-          location.nonAtomicValue = desired
+    proc compareExchange*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
+      atomic_compare_exchange_strong_explicit(addr(location.value), cast[ptr nonAtomicType(T)](addr(expected)), cast[nonAtomicType(T)](desired), success, failure)
 
-    proc compareExchange*[T](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
-      enforceLockFreeCheck(T)
-      when T.isLockFree:
-        atomic_compare_exchange_strong_explicit(addr(location.value), cast[ptr nonAtomicType(T)](addr(expected)), cast[nonAtomicType(T)](desired), success, failure)
-      else:
-        withLock(location, success):
-          if location.nonAtomicValue != expected:
-            expected = location.nonAtomicValue
-            return false
-          expected = desired
-          swap(location.nonAtomicValue, expected)
-          return true
-
-    proc compareExchange*[T](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
+    proc compareExchange*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
       compareExchange(location, expected, desired, order, order)
 
-    proc compareExchangeWeak*[T](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
-      enforceLockFreeCheck(T)
-      when T.isLockFree:
-        atomic_compare_exchange_weak_explicit(addr(location.value), cast[ptr nonAtomicType(T)](addr(expected)), cast[nonAtomicType(T)](desired), success, failure)
-      else:
-        compareExchange(location, expected, desired, success, failure)
+    proc compareExchangeWeak*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; success, failure: MemoryOrder): bool {.inline.} =
+      atomic_compare_exchange_weak_explicit(addr(location.value), cast[ptr nonAtomicType(T)](addr(expected)), cast[nonAtomicType(T)](desired), success, failure)
 
-    proc compareExchangeWeak*[T](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
+    proc compareExchangeWeak*[T: LockFree](location: var Atomic[T]; expected: var T; desired: T; order: MemoryOrder = moSequentiallyConsistent): bool {.inline.} =
       compareExchangeWeak(location, expected, desired, order, order)
 
     # Numerical operations
@@ -659,3 +752,80 @@ proc `+=`*[T: SomeAtomicInt](location: var Atomic[T]; value: T) {.inline.} =
 proc `-=`*[T: SomeAtomicInt](location: var Atomic[T]; value: T) {.inline.} =
   ## Atomically decrements the atomic value by `value`.
   discard location.fetchSub(value)
+
+# Wait/notify operations - defined once for all backends
+proc wait*[T: Waitable](location: var Atomic[T], expected: T) =
+  ## Blocks the calling thread until the atomic value is no longer equal to `expected`,
+  ## or until a spurious wakeup occurs. The check and wait are performed atomically.
+  ##
+  ## This is more efficient than spin-waiting as it allows the thread to sleep.
+  ## Use `notifyOne` or `notifyAll` to wake waiting threads.
+  ##
+  ## Requires `T` to satisfy `Waitable` concept (platform-specific size constraints).
+  let address = addr location
+  when defined(linux):
+    discard futexWait(cast[ptr int32](address), cast[int32](expected))
+  elif defined(freebsd):
+    discard freebsdWait(cast[ptr uint32](address), cast[uint32](expected))
+  elif defined(openbsd):
+    discard openbsdWait(cast[ptr int32](address), cast[int32](expected))
+  elif defined(windows):
+    discard windowsWait(cast[ptr T](address), expected)
+  elif hasDarwinUlock and sizeof(T) == 4:
+    discard darwinWait32(cast[ptr uint32](address), cast[uint32](expected))
+  elif hasDarwinUlock and sizeof(T) == 8:
+    discard darwinWait64(cast[ptr uint64](address), cast[uint64](expected))
+
+proc wait*[T: Waitable](location: var Atomic[T], expected: T, timeout: Duration): bool =
+  ## Like `wait`, but returns `false` if the timeout expires before being woken.
+  ## Returns `true` if woken by notify or value change.
+  ##
+  ## Requires `T` to satisfy `Waitable` concept (platform-specific size constraints).
+  let address = addr location
+  let timeoutUs = timeout.inMicroseconds.int
+  when defined(linux):
+    result = futexWait(cast[ptr int32](address), cast[int32](expected), timeoutUs)
+  elif defined(freebsd):
+    result = freebsdWait(cast[ptr uint32](address), cast[uint32](expected), timeoutUs)
+  elif defined(openbsd):
+    result = openbsdWait(cast[ptr int32](address), cast[int32](expected), timeoutUs)
+  elif defined(windows):
+    result = windowsWait(cast[ptr T](address), expected, timeoutUs)
+  elif hasDarwinUlock and sizeof(T) == 4:
+    result = darwinWait32(cast[ptr uint32](address), cast[uint32](expected), timeoutUs)
+  elif hasDarwinUlock and sizeof(T) == 8:
+    result = darwinWait64(cast[ptr uint64](address), cast[uint64](expected), timeoutUs)
+
+proc notifyOne*[T: Waitable](location: var Atomic[T]) =
+  ## Wakes at least one thread waiting on `location`.
+  ## If no threads are waiting, this is a no-op.
+  ##
+  ## Requires `T` to satisfy `Waitable` concept (platform-specific size constraints).
+  let address = addr location
+  when defined(linux):
+    futexWakeOne(cast[ptr int32](address))
+  elif defined(freebsd):
+    freebsdWakeOne(cast[ptr uint32](address))
+  elif defined(openbsd):
+    openbsdWakeOne(cast[ptr int32](address))
+  elif defined(windows):
+    WakeByAddressSingle(address)
+  elif hasDarwinUlock:
+    darwinWakeOne(address)
+
+proc notifyAll*[T: Waitable](location: var Atomic[T]) =
+  ## Wakes all threads waiting on `location`.
+  ## If no threads are waiting, this is a no-op.
+  ##
+  ## Requires `T` to satisfy `Waitable` concept (platform-specific size constraints).
+  let address = addr location
+  when defined(linux):
+    futexWakeAll(cast[ptr int32](address))
+  elif defined(freebsd):
+    freebsdWakeAll(cast[ptr uint32](address))
+  elif defined(openbsd):
+    openbsdWakeAll(cast[ptr int32](address))
+  elif defined(windows):
+    WakeByAddressAll(address)
+  elif hasDarwinUlock:
+    darwinWakeAll(address)
