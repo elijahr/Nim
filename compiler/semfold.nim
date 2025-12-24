@@ -16,7 +16,7 @@ import
   commands, magicsys, modulegraphs, lineinfos, wordrecg
 
 import std/[strutils, math, strtabs]
-#from system/memory import nimCStrLen
+import system/memory
 
 when defined(nimPreviewSlimSystem):
   import std/[assertions, formatfloat]
@@ -159,7 +159,7 @@ proc evalOp(m: TMagic, n, a, b, c: PNode; idgen: IdGenerator; g: ModuleGraph): P
       if a.typ.kind == tyString:
         result = newIntNodeT(toInt128(a.strVal.len), n, idgen, g)
       elif a.typ.kind == tyCstring:
-        result = newIntNodeT(toInt128(nimCStrLen(a.strVal.cstring)), n, idgen, g)
+        result = newIntNodeT(toInt128(memory.nimCStrLen(a.strVal.cstring)), n, idgen, g)
     else:
       result = newIntNodeT(toInt128(a.len), n, idgen, g)
   of mUnaryPlusI, mUnaryPlusF64: result = a # throw `+` away
