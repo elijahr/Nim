@@ -7835,6 +7835,21 @@ so that one can get the size of it at compile time even if it was declared witho
       echo sizeof(AtomicFlag)
   ```
 
+For generic imported types, the `size` pragma can use expressions involving `sizeof(T)`
+where `T` is a generic type parameter. The expression is evaluated when the generic type
+is instantiated:
+
+  ```Nim
+    type
+      Atomic*[T] {.importcpp: "std::atomic", size: sizeof(T).} = object
+
+    static:
+      doAssert sizeof(Atomic[int32]) == sizeof(int32)
+      doAssert sizeof(Atomic[int64]) == sizeof(int64)
+  ```
+
+This allows proper size specification for C++ template types without needing fake fields.
+
 
 Align pragma
 ------------
@@ -7867,6 +7882,17 @@ alignment requirement of the type are ignored.
   ```
 
 This pragma has no effect on the JS backend.
+
+For generic imported types, the `align` pragma can use `alignof(T)` where `T` is a
+generic type parameter:
+
+  ```Nim
+    type
+      Atomic*[T] {.importcpp: "std::atomic", size: sizeof(T), align: alignof(T).} = object
+
+    static:
+      doAssert alignof(Atomic[int64]) == alignof(int64)
+  ```
 
 
 Noalias pragma

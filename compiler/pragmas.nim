@@ -72,7 +72,7 @@ const
     wRaises, wLocks, wTags, wForbids, wRequires, wEnsures, wEffectsOf,
     wGcSafe, wCodegenDecl, wNoInit, wCompileTime}
   typePragmas* = declPragmas + {wMagic, wAcyclic,
-    wPure, wHeader, wCompilerProc, wCore, wFinal, wSize, wShallow,
+    wPure, wHeader, wCompilerProc, wCore, wFinal, wSize, wAlign, wShallow,
     wIncompleteStruct, wCompleteStruct, wByCopy, wByRef,
     wInheritable, wGensym, wInject, wRequiresInit, wUnchecked, wUnion, wPacked,
     wCppNonPod, wBorrow, wGcSafe, wPartial, wExplain, wPackage, wCodegenDecl,
@@ -96,6 +96,22 @@ const
   forVarPragmas* = {wInject, wGensym}
   allRoutinePragmas* = methodPragmas + iteratorPragmas + lambdaPragmas
   enumFieldPragmas* = {wDeprecated}
+
+proc containsIdent(n: PNode): bool =
+  ## Returns true if n contains any unresolved identifiers
+  result = false
+  if n == nil: return
+  case n.kind
+  of nkIdent:
+    result = true
+  of nkSym:
+    if n.sym != nil and n.sym.kind in {skGenericParam, skParam, skType}:
+      if n.sym.typ != nil and n.sym.typ.kind in {tyGenericParam, tyGenericInvocation}:
+        result = true
+  else:
+    for child in n:
+      if containsIdent(child):
+        return true
 
 proc getPragmaVal*(procAst: PNode; name: TSpecialWord): PNode =
   result = nil
@@ -725,12 +741,12 @@ proc processPragma(c: PContext, n: PNode, i: int) =
 proc pragmaRaisesOrTags(c: PContext, n: PNode) =
   proc processExc(c: PContext, x: PNode) =
     if c.hasUnresolvedArgs(c, x):
-      x.typ() = makeTypeFromExpr(c, x)
+      x.typ = makeTypeFromExpr(c, x)
     else:
       var t = skipTypes(c.semTypeNode(c, x, nil), skipPtrs)
       if t.kind notin {tyObject, tyOr}:
         localError(c.config, x.info, errGenerated, "invalid type for raises/tags list")
-      x.typ() = t
+      x.typ = t
 
   if n.kind in nkPragmaCallKinds and n.len == 2:
     let it = n[1]
@@ -946,26 +962,53 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         processImportObjC(c, sym, getOptionalStr(c, it, "$1"), it.info)
       of wSize:
         if sym.typ == nil: invalidPragma(c, it)
-        var size = expectIntLit(c, it)
-        if sfImportc in sym.flags:
-          # no restrictions on size for imported types
-          setImportedTypeSize(c.config, sym.typ, size)
         else:
-          case size
-          of 1, 2, 4:
-            sym.typ.size = size
-            sym.typ.align = int16 size
-          of 8:
-            sym.typ.size = 8
-            sym.typ.align = floatInt64Align(c.config)
+          let expr = if it.kind in nkPragmaCallKinds and it.len == 2: it[1] else: nil
+          if expr == nil:
+            localError(c.config, it.info, "size pragma requires an argument")
           else:
-            localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
+            if containsIdent(expr):
+              if sfImportc notin sym.flags:
+                localError(c.config, it.info,
+                  "deferred size expressions only supported for imported types")
+              else:
+                sym.typ.sizeExpr = expr
+                sym.typ.incl tfDeferredSize
+            else:
+              let exprCopy = expr.copyTree
+              let evaluated = c.semConstExpr(c, exprCopy)
+              if evaluated.kind in nkIntLit..nkInt64Lit:
+                let size = int(evaluated.intVal)
+                if sfImportc in sym.flags:
+                  setImportedTypeSize(c.config, sym.typ, size)
+                else:
+                  case size
+                  of 1, 2, 4:
+                    sym.typ.size = size
+                    sym.typ.align = int16 size
+                  of 8:
+                    sym.typ.size = 8
+                    sym.typ.align = floatInt64Align(c.config)
+                  else:
+                    localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
+              else:
+                localError(c.config, it.info, "size must be a compile-time constant integer")
       of wAlign:
-        let alignment = expectIntLit(c, it)
-        if isPowerOfTwo(alignment) and alignment > 0:
-          sym.alignment = max(sym.alignment, alignment)
+        let expr = if it.kind in nkPragmaCallKinds and it.len == 2: it[1] else: nil
+        if expr == nil:
+          localError(c.config, it.info, "align pragma requires an argument")
+        elif sym.typ != nil and sfImportc in sym.flags and containsIdent(expr):
+          sym.typ.alignExpr = expr
+          sym.typ.incl tfDeferredAlign
         else:
-          localError(c.config, it.info, "power of two expected")
+          let alignment = expectIntLit(c, it)
+          if isPowerOfTwo(alignment) and alignment > 0:
+            if sym.typ != nil and sym.kind == skType:
+              sym.typ.align = int16(max(int(sym.typ.align), alignment))
+            else:
+              sym.alignment = max(sym.alignment, alignment)
+          else:
+            localError(c.config, it.info, "power of two expected")
       of wNodecl:
         noVal(c, it)
         sym.incl(lfNoDecl)
