@@ -64,6 +64,15 @@ errors.
 
 ## Language changes
 
+- The `size` and `align` pragmas for imported types now support expressions using
+  `sizeof(T)` and `alignof(T)` where `T` is a generic type parameter. This enables
+  proper size/alignment specification for C++ template types:
+  ```nim
+  type Atomic*[T] {.importcpp: "std::atomic", size: sizeof(T), align: alignof(T).} = object
+  ```
+  The `align` pragma is now also valid for type definitions (previously only for fields/variables).
+  Use `defined(nimHasGenericSize)` for backward compatibility.
+
 - An experimental option `--experimental:typeBoundOps` has been added that
   implements the RFC https://github.com/nim-lang/RFCs/issues/380.
   This makes the behavior of interfaces like `hash`, `$`, `==` etc. more

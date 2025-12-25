@@ -379,6 +379,24 @@ proc `align=`*(t: PType, val: int16) {.inline.} =
   if t.state == Partial: loadType(t)
   t.alignImpl = val
 
+proc sizeExpr*(t: PType): PNode {.inline.} =
+  if t.state == Partial: loadType(t)
+  result = t.sizeExprImpl
+
+proc `sizeExpr=`*(t: PType, val: PNode) {.inline.} =
+  assert t.state != Sealed
+  if t.state == Partial: loadType(t)
+  t.sizeExprImpl = val
+
+proc alignExpr*(t: PType): PNode {.inline.} =
+  if t.state == Partial: loadType(t)
+  result = t.alignExprImpl
+
+proc `alignExpr=`*(t: PType, val: PNode) {.inline.} =
+  assert t.state != Sealed
+  if t.state == Partial: loadType(t)
+  t.alignExprImpl = val
+
 proc paddingAtEnd*(t: PType): int16 {.inline.} =
   if t.state == Partial: loadType(t)
   result = t.paddingAtEndImpl
