@@ -1259,6 +1259,8 @@ proc genFlags*(s: set[TSymFlag]; dest: var string) =
     of sfCodegenDecl: dest.add "c5"
     of sfWasGenSym: dest.add "w0"
     of sfForceLift: dest.add "l"
+    of sfDeferredAlign: dest.add "df0"
+    of sfDeferredSize: dest.add "df1"
     of sfDirty: dest.add "d3"
     of sfCustomPragma: dest.add "c6"
     of sfBase: dest.add "b1"
@@ -1325,6 +1327,16 @@ proc parse*(t: typedesc[TSymFlag]; s: string): set[TSymFlag] =
       elif i+1 < s.len and s[i+1] == '3':
         result.incl sfDirty
         inc i
+      elif i+1 < s.len and s[i+1] == 'f':
+        # Handle "df0" and "df1" for deferred field pragmas
+        if i+2 < s.len and s[i+2] == '0':
+          result.incl sfDeferredAlign
+          inc i, 2
+        elif i+2 < s.len and s[i+2] == '1':
+          result.incl sfDeferredSize
+          inc i, 2
+        else:
+          inc i
       else: result.incl sfDiscriminant
     of 'e':
       if i+1 < s.len and s[i+1] == '0':

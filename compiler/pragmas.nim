@@ -997,9 +997,15 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         let expr = if it.kind in nkPragmaCallKinds and it.len == 2: it[1] else: nil
         if expr == nil:
           localError(c.config, it.info, "align pragma requires an argument")
-        elif sym.typ != nil and sfImportc in sym.flags and containsIdent(expr):
+        # TYPE LEVEL: deferred expressions for imported types
+        elif sym.typ != nil and sym.kind == skType and sfImportc in sym.flags and containsIdent(expr):
           sym.typ.alignExpr = expr
           sym.typ.incl tfDeferredAlign
+        # FIELD LEVEL: deferred expressions for fields in generic types
+        elif sym.kind == skField and containsIdent(expr):
+          sym.alignExpr = expr
+          sym.incl sfDeferredAlign
+        # IMMEDIATE EVALUATION: non-generic or already-resolved expressions
         else:
           let alignment = expectIntLit(c, it)
           if isPowerOfTwo(alignment) and alignment > 0:

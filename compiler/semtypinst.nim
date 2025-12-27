@@ -83,6 +83,7 @@ type
 proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType, isInstValue = false): PType
 proc replaceTypeVarsS(cl: var TReplTypeVars, s: PSym, t: PType): PSym
 proc replaceTypeVarsN*(cl: var TReplTypeVars, n: PNode; start=0; expectedType: PType = nil): PNode
+proc evaluateDeferredFieldPragmas(cl: var TReplTypeVars, s: PSym, body: PType)
 
 proc newTypeMapLayer*(cl: var TReplTypeVars): LayeredIdTable =
   result = newTypeMapLayer(cl.typeMap)
@@ -381,6 +382,23 @@ proc replaceTypeVarsS(cl: var TReplTypeVars, s: PSym, t: PType): PSym =
   if result.kind != skType:
     result.ast = replaceTypeVarsN(cl, s.ast)
 
+  # Copy and evaluate deferred pragma expressions for fields
+  if result.kind == skField:
+    # Copy deferred align expression if present
+    if sfDeferredAlign in s.flags and s.alignExpr != nil:
+      result.alignExpr = s.alignExpr
+      result.incl sfDeferredAlign
+
+    # Copy deferred size expression if present
+    if sfDeferredSize in s.flags and s.sizeExpr != nil:
+      result.sizeExpr = s.sizeExpr
+      result.incl sfDeferredSize
+
+    # Evaluate deferred field pragmas now that we have concrete types
+    # The cl.owner.typ.kind check ensures we have the generic body available
+    if cl.owner != nil and cl.owner.typ != nil and cl.owner.typ.kind == tyGenericBody:
+      evaluateDeferredFieldPragmas(cl, result, cl.owner.typ)
+
 proc lookupTypeVar(cl: var TReplTypeVars, t: PType): PType =
   if tfRetType in t.flags and t.kind == tyAnything:
     # don't bind `auto` return type to a previous binding of `auto`
@@ -520,6 +538,67 @@ proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
       else:
         localError(cl.c.config, t.alignExpr.info,
           "could not evaluate align expression to integer")
+
+proc evaluateDeferredFieldPragmas(cl: var TReplTypeVars, s: PSym, body: PType) =
+  ## Evaluates deferred pragma expressions on field symbols after generic instantiation.
+  ## This is called from replaceTypeVarsS when instantiating field symbols.
+  ## If the type params are still generic (nested generic context), we skip
+  ## evaluation and leave the flags set for later instantiation.
+
+  if s.kind != skField:
+    return
+
+  # Evaluate deferred align expression
+  if sfDeferredAlign in s.flags:
+    if s.alignExpr != nil:
+      # Replace generic param identifiers with concrete types
+      var hasUnresolved = false
+      var alignExpr = replaceIdentsWithTypes(cl, s.alignExpr, body, hasUnresolved)
+
+      if hasUnresolved:
+        # Still in a nested generic context - don't evaluate yet
+        # Keep the deferred expression and flag for next instantiation level
+        return
+
+      # Now evaluate the expression with concrete types
+      let alignVal = cl.c.semConstExpr(cl.c, alignExpr)
+      if alignVal.kind in nkIntLit..nkInt64Lit:
+        let alignment = int(alignVal.intVal)
+        if isPowerOfTwo(alignment) and alignment > 0:
+          # Set the field's alignment
+          s.alignment = max(s.alignment, alignment)
+          # Clear deferred flag and expression
+          s.excl sfDeferredAlign
+          s.alignExpr = nil
+        else:
+          localError(cl.c.config, s.alignExpr.info,
+            "alignment must be a power of two, got: " & $alignment)
+      else:
+        localError(cl.c.config, s.alignExpr.info,
+          "could not evaluate align expression to integer")
+
+  # Evaluate deferred size expression (for bitfields)
+  if sfDeferredSize in s.flags:
+    if s.sizeExpr != nil:
+      var hasUnresolved = false
+      var sizeExpr = replaceIdentsWithTypes(cl, s.sizeExpr, body, hasUnresolved)
+
+      if hasUnresolved:
+        return
+
+      let sizeVal = cl.c.semConstExpr(cl.c, sizeExpr)
+      if sizeVal.kind in nkIntLit..nkInt64Lit:
+        let size = int(sizeVal.intVal)
+        if size > 0:
+          s.bitsize = size
+          s.excl sfDeferredSize
+          s.sizeExpr = nil
+        else:
+          localError(cl.c.config, s.sizeExpr.info,
+            "bitfield size must be positive, got: " & $size)
+      else:
+        localError(cl.c.config, s.sizeExpr.info,
+          "could not evaluate size expression to integer")
 
 proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   # tyGenericInvocation[A, tyGenericInvocation[A, B]]

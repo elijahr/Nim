@@ -127,6 +127,9 @@ type
     sfWasGenSym       # symbol was 'gensym'ed
     sfForceLift       # variable has to be lifted into closure environment
 
+    sfDeferredAlign   # field has deferred align pragma expression
+    sfDeferredSize    # field has deferred size pragma expression (for bitfields)
+
     sfDirty           # template is not hygienic (old styled template) module,
                       # compiled from a dirty-buffer
     sfCustomPragma    # symbol is custom pragma template
@@ -711,7 +714,9 @@ type
     of skLet, skVar, skField, skForVar:
       guardImpl*: PSym
       bitsizeImpl*: int
-      alignmentImpl*: int # for alignment
+      alignmentImpl*: int        # for alignment
+      alignExprImpl*: PNode      # deferred align expression (nil = use alignmentImpl)
+      sizeExprImpl*: PNode       # deferred size expression for bitfields (nil = use bitsizeImpl)
     else: nil
     magicImpl*: TMagic
     typImpl*: PType
