@@ -72,7 +72,7 @@ const
     wRaises, wLocks, wTags, wForbids, wRequires, wEnsures, wEffectsOf,
     wGcSafe, wCodegenDecl, wNoInit, wCompileTime}
   typePragmas* = declPragmas + {wMagic, wAcyclic,
-    wPure, wHeader, wCompilerProc, wCore, wFinal, wSize, wShallow,
+    wPure, wHeader, wCompilerProc, wCore, wFinal, wSize, wAlign, wShallow,
     wIncompleteStruct, wCompleteStruct, wByCopy, wByRef,
     wInheritable, wGensym, wInject, wRequiresInit, wUnchecked, wUnion, wPacked,
     wCppNonPod, wBorrow, wGcSafe, wPartial, wExplain, wPackage, wCodegenDecl,
@@ -963,7 +963,10 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
       of wAlign:
         let alignment = expectIntLit(c, it)
         if isPowerOfTwo(alignment) and alignment > 0:
-          sym.alignment = max(sym.alignment, alignment)
+          if sym.typ != nil and sym.kind == skType:
+            sym.typ.align = int16(max(int(sym.typ.align), alignment))
+          else:
+            sym.alignment = max(sym.alignment, alignment)
         else:
           localError(c.config, it.info, "power of two expected")
       of wNodecl:

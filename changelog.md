@@ -99,6 +99,13 @@ errors.
   See the [experimental manual](https://nim-lang.github.io/Nim/manual_experimental.html#typeminusbound-overloads)
   for more information.
 
+- The `align` pragma is now valid for type definitions, not just fields and variables.
+  This allows specifying alignment requirements for entire types:
+  ```nim
+  type AlignedType {.align: 16.} = object
+    x: int32
+  ```
+
 ## Compiler changes
 
 

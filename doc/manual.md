@@ -7839,8 +7839,8 @@ so that one can get the size of it at compile time even if it was declared witho
 Align pragma
 ------------
 
-The `align`:idx: pragma is for variables and object field members. It
-modifies the alignment requirement of the entity being declared. The
+The `align`:idx: pragma is for variables, object field members, and type definitions.
+It modifies the alignment requirement of the entity being declared. The
 argument must be a constant power of 2. Valid non-zero
 alignments that are weaker than other align pragmas on the same
 declaration are ignored. Alignments that are weaker than the
@@ -7848,6 +7848,10 @@ alignment requirement of the type are ignored.
 
   ```Nim
   type
+    # Type-level alignment
+    AlignedType {.align(16).} = object
+      x: int32
+
     sseType = object
       sseData {.align(16).}: array[4, float32]
 
