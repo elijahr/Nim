@@ -995,7 +995,7 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
               else:
                 localError(c.config, it.info, "size must be a compile-time constant integer")
         else:
-          # FIELD LEVEL: Legacy behavior for non-type symbols
+          # Fallback: simple integer parsing for non-type symbols
           var size = expectIntLit(c, it)
           if sfImportc in sym.flags:
             setImportedTypeSize(c.config, sym.typ, size)
@@ -1058,7 +1058,7 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
             else:
               localError(c.config, it.info, "align must be a compile-time constant integer")
         else:
-          # Legacy behavior for other symbol types (just parse the integer)
+          # Fallback: simple integer parsing for other symbol kinds
           let alignment = expectIntLit(c, it)
           if isPowerOfTwo(alignment) and alignment > 0:
             sym.alignment = max(sym.alignment, alignment)
