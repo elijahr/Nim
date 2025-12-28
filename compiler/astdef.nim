@@ -127,6 +127,9 @@ type
     sfWasGenSym       # symbol was 'gensym'ed
     sfForceLift       # variable has to be lifted into closure environment
 
+    sfDeferredAlign   # field has deferred align pragma expression
+    sfDeferredSize    # field has deferred size pragma expression (for bitfields)
+
     sfDirty           # template is not hygienic (old styled template) module,
                       # compiled from a dirty-buffer
     sfCustomPragma    # symbol is custom pragma template
@@ -323,6 +326,7 @@ type
     nfDisabledOpenSym # temporary: node should be nkOpenSym but cannot
                       # because openSym experimental switch is disabled
                       # gives warning instead
+    nfLazyType  # node has a lazy type
 
   TNodeFlags* = set[TNodeFlag]
   TTypeFlag* = enum   # keep below 32 for efficiency reasons (now: 47)
@@ -397,6 +401,8 @@ type
     tfIsOutParam
     tfSendable
     tfImplicitStatic
+    tfDeferredSize      # size pragma has deferred expression
+    tfDeferredAlign     # align pragma has deferred expression
 
   TTypeFlags* = set[TTypeFlag]
 
@@ -708,7 +714,9 @@ type
     of skLet, skVar, skField, skForVar:
       guardImpl*: PSym
       bitsizeImpl*: int
-      alignmentImpl*: int # for alignment
+      alignmentImpl*: int        # for alignment
+      alignExprImpl*: PNode      # deferred align expression (nil = use alignmentImpl)
+      sizeExprImpl*: PNode       # deferred size expression for bitfields (nil = use bitsizeImpl)
     else: nil
     magicImpl*: TMagic
     typImpl*: PType
@@ -796,6 +804,8 @@ type
                               # -1 means that the size is unknown
     alignImpl*: int16             # the type's alignment requirements
     paddingAtEndImpl*: int16      #
+    sizeExprImpl*: PNode          # deferred size expression (nil = use sizeImpl)
+    alignExprImpl*: PNode         # deferred align expression (nil = use alignImpl)
     locImpl*: TLoc
     typeInstImpl*: PType          # for generic instantiations the tyGenericInst that led to this
                               # type.
@@ -866,7 +876,7 @@ const
                                       nfFromTemplate, nfDefaultRefsParam,
                                       nfExecuteOnReload, nfLastRead,
                                       nfFirstWrite, nfSkipFieldChecking,
-                                      nfDisabledOpenSym}
+                                      nfDisabledOpenSym, nfLazyType}
   namePos* = 0
   patternPos* = 1    # empty except for term rewriting macros
   genericParamsPos* = 2
@@ -988,6 +998,22 @@ proc newStrNode*(kind: TNodeKind, strVal: string): PNode =
 proc newStrNode*(strVal: string; info: TLineInfo): PNode =
   result = newNodeI(nkStrLit, info)
   result.strVal = strVal
+
+# Hooks, converters, method dispatchers and enum-to-string generated procs need special
+# handling for IC, they end up in IC indexes etc. Thus we "log" them in the module graph
+# and to pass them around to the NIF writer. This is not very elegant but it works.
+
+type
+  LogEntryKind* = enum
+    HookEntry, ConverterEntry, MethodEntry, EnumToStrEntry, GenericInstEntry
+  LogEntry* = object
+    kind*: LogEntryKind
+    op*: TTypeAttachedOp
+    isGeneric*: bool
+    module*: int  # Which module this entry belongs to
+    key*: string
+    sym*: PSym
+
 
 proc forcePartial*(s: PSym) =
   ## Resets all impl-fields to their default values and sets state to Partial.

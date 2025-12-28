@@ -9,7 +9,7 @@
 
 # This module does the instantiation of generic types.
 
-import std / tables
+import std / [tables, math]
 
 import ast, astalgo, msgs, types, magicsys, semdata, renderer, options,
   lineinfos, modulegraphs, layeredtable
@@ -17,7 +17,7 @@ import ast, astalgo, msgs, types, magicsys, semdata, renderer, options,
 when defined(nimPreviewSlimSystem):
   import std/assertions
 
-const tfInstClearedFlags = {tfHasMeta, tfUnresolved}
+const tfInstClearedFlags = {tfHasMeta, tfUnresolved, tfDeferredSize, tfDeferredAlign}
 
 proc checkPartialConstructedType(conf: ConfigRef; info: TLineInfo, t: PType) =
   if t.kind in {tyVar, tyLent} and t.elementType.kind in {tyVar, tyLent}:
@@ -83,6 +83,7 @@ type
 proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType, isInstValue = false): PType
 proc replaceTypeVarsS(cl: var TReplTypeVars, s: PSym, t: PType): PSym
 proc replaceTypeVarsN*(cl: var TReplTypeVars, n: PNode; start=0; expectedType: PType = nil): PNode
+proc evaluateDeferredFieldPragmas(cl: var TReplTypeVars, s: PSym, body: PType)
 
 proc newTypeMapLayer*(cl: var TReplTypeVars): LayeredIdTable =
   result = newTypeMapLayer(cl.typeMap)
@@ -110,7 +111,7 @@ proc prepareNode*(cl: var TReplTypeVars, n: PNode): PNode =
     return if tfUnresolved in t.flags: prepareNode(cl, t.n)
            else: t.n
   result = copyNode(n)
-  result.typ() = t
+  result.typ = t
   if result.kind == nkSym:
     result.sym =
       if n.typ != nil and n.typ == n.sym.typ:
@@ -249,13 +250,24 @@ proc hasValuelessStatics(n: PNode): bool =
         a
     proc doThing(_: MyThing)
   ]#
+  result = false
   if n.safeLen == 0 and n.kind != nkEmpty: # Some empty nodes can get in here
-    n.typ == nil or n.typ.kind == tyStatic
+    if n.typ == nil:
+      result = true
+    elif n.typ.kind == tyStatic:
+      result = true
+    elif n.typ.kind == tyTypeDesc:
+      # Check if the base type is an unresolved generic parameter.
+      # This handles cases where a template containing sizeof(T) is called
+      # inside a generic object's when clause - the T needs to be resolved
+      # before we can evaluate the condition.
+      let base = n.typ.skipTypes({tyTypeDesc})
+      if base.kind == tyGenericParam:
+        result = true
   else:
     for x in n:
       if hasValuelessStatics(x):
         return true
-    false
 
 proc replaceTypeVarsN(cl: var TReplTypeVars, n: PNode; start=0; expectedType: PType = nil): PNode =
   if n == nil: return
@@ -264,7 +276,7 @@ proc replaceTypeVarsN(cl: var TReplTypeVars, n: PNode; start=0; expectedType: PT
     if n.typ.kind == tyFromExpr:
       # type of node should not be evaluated as a static value
       n.typ.incl tfNonConstExpr
-    result.typ() = replaceTypeVarsT(cl, n.typ)
+    result.typ = replaceTypeVarsT(cl, n.typ)
     checkMetaInvariants(cl, result.typ)
   case n.kind
   of nkNone..pred(nkSym), succ(nkSym)..nkNilLit:
@@ -370,6 +382,23 @@ proc replaceTypeVarsS(cl: var TReplTypeVars, s: PSym, t: PType): PSym =
   if result.kind != skType:
     result.ast = replaceTypeVarsN(cl, s.ast)
 
+  # Copy and evaluate deferred pragma expressions for fields
+  if result.kind == skField:
+    # Copy deferred align expression if present
+    if sfDeferredAlign in s.flags and s.alignExpr != nil:
+      result.alignExpr = s.alignExpr
+      result.incl sfDeferredAlign
+
+    # Copy deferred size expression if present
+    if sfDeferredSize in s.flags and s.sizeExpr != nil:
+      result.sizeExpr = s.sizeExpr
+      result.incl sfDeferredSize
+
+    # Evaluate deferred field pragmas now that we have concrete types
+    # The cl.owner.typ.kind check ensures we have the generic body available
+    if cl.owner != nil and cl.owner.typ != nil and cl.owner.typ.kind == tyGenericBody:
+      evaluateDeferredFieldPragmas(cl, result, cl.owner.typ)
+
 proc lookupTypeVar(cl: var TReplTypeVars, t: PType): PType =
   if tfRetType in t.flags and t.kind == tyAnything:
     # don't bind `auto` return type to a previous binding of `auto`
@@ -407,6 +436,169 @@ proc instCopyType*(cl: var TReplTypeVars, t: PType): PType =
       result.assignment = nil
       result.destructor = nil
       result.sink = nil
+
+proc replaceIdentsWithTypes(cl: var TReplTypeVars, n: PNode, body: PType, hasUnresolved: var bool): PNode =
+  ## Walks the expression and replaces identifier nodes with type symbols
+  ## based on the generic parameters in body and concrete types in typeMap.
+  ## Sets hasUnresolved to true if any generic param couldn't be resolved to a concrete type.
+  if n == nil: return nil
+
+  case n.kind
+  of nkIdent:
+    # Look for this identifier in the generic params
+    for i in FirstGenericParamAt..<body.kidsLen:
+      let param = body[i-1]
+      if param.sym != nil and param.sym.name.s == n.ident.s:
+        # Found matching generic param - get concrete type from typeMap
+        let concreteType = cl.typeMap.lookup(param)
+        if concreteType != nil:
+          # Check if it's still a generic param (nested generic context)
+          if concreteType.kind == tyGenericParam:
+            hasUnresolved = true
+            result = n
+            return
+          # Create a symbol node referencing the concrete type's symbol
+          if concreteType.sym != nil:
+            result = newSymNode(concreteType.sym, n.info)
+          else:
+            # For types without a symbol (like int), create a type node
+            result = newNodeIT(nkType, n.info, concreteType)
+          return
+    # Not a generic param, keep as-is
+    result = n
+  of nkSym:
+    # Check if it's a generic param symbol
+    if n.sym != nil and n.sym.typ != nil and n.sym.typ.kind == tyGenericParam:
+      let concreteType = cl.typeMap.lookup(n.sym.typ)
+      if concreteType != nil:
+        # Check if it's still a generic param (nested generic context)
+        if concreteType.kind == tyGenericParam:
+          hasUnresolved = true
+          result = n
+          return
+        if concreteType.sym != nil:
+          result = newSymNode(concreteType.sym, n.info)
+        else:
+          result = newNodeIT(nkType, n.info, concreteType)
+        return
+    result = copyNode(n)
+    result.typ = replaceTypeVarsT(cl, n.typ)
+  of nkCharLit..nkNilLit:
+    # Literals don't have children
+    result = copyNode(n)
+  else:
+    result = copyNode(n)
+    result.typ = if n.typ != nil: replaceTypeVarsT(cl, n.typ) else: nil
+    for i in 0..<n.len:
+      result.add replaceIdentsWithTypes(cl, n[i], body, hasUnresolved)
+
+proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
+  ## Evaluates deferred pragma expressions after generic instantiation.
+  ## If the type params are still generic (nested generic context), we skip
+  ## evaluation and leave the flag set for later.
+  if tfDeferredSize in t.flags:
+    if t.sizeExpr != nil:
+      # Replace identifiers with concrete types, then evaluate
+      var hasUnresolved = false
+      var sizeExpr = replaceIdentsWithTypes(cl, t.sizeExpr, body, hasUnresolved)
+
+      if hasUnresolved:
+        # Still in a nested generic context - don't evaluate yet
+        return
+
+      # Now evaluate with concrete types
+      let sizeVal = cl.c.semConstExpr(cl.c, sizeExpr)
+      if sizeVal.kind in nkIntLit..nkInt64Lit:
+        let size = int(sizeVal.intVal)
+        setImportedTypeSize(cl.c.config, t, size)
+        t.excl tfDeferredSize
+        t.sizeExpr = nil
+      else:
+        localError(cl.c.config, t.sizeExpr.info,
+          "could not evaluate size expression to integer")
+
+  if tfDeferredAlign in t.flags:
+    if t.alignExpr != nil:
+      var hasUnresolved = false
+      var alignExpr = replaceIdentsWithTypes(cl, t.alignExpr, body, hasUnresolved)
+
+      if hasUnresolved:
+        return
+
+      let alignVal = cl.c.semConstExpr(cl.c, alignExpr)
+      if alignVal.kind in nkIntLit..nkInt64Lit:
+        let alignment = int(alignVal.intVal)
+        if isPowerOfTwo(alignment) and alignment > 0:
+          t.align = int16(alignment)
+          t.excl tfDeferredAlign
+          t.alignExpr = nil
+        else:
+          localError(cl.c.config, t.alignExpr.info,
+            "power of two expected")
+      else:
+        localError(cl.c.config, t.alignExpr.info,
+          "could not evaluate align expression to integer")
+
+proc evaluateDeferredFieldPragmas(cl: var TReplTypeVars, s: PSym, body: PType) =
+  ## Evaluates deferred pragma expressions on field symbols after generic instantiation.
+  ## This is called from replaceTypeVarsS when instantiating field symbols.
+  ## If the type params are still generic (nested generic context), we skip
+  ## evaluation and leave the flags set for later instantiation.
+
+  if s.kind != skField:
+    return
+
+  # Evaluate deferred align expression
+  if sfDeferredAlign in s.flags:
+    if s.alignExpr != nil:
+      # Replace generic param identifiers with concrete types
+      var hasUnresolved = false
+      var alignExpr = replaceIdentsWithTypes(cl, s.alignExpr, body, hasUnresolved)
+
+      if hasUnresolved:
+        # Still in a nested generic context - don't evaluate yet
+        # Keep the deferred expression and flag for next instantiation level
+        return
+
+      # Now evaluate the expression with concrete types
+      let alignVal = cl.c.semConstExpr(cl.c, alignExpr)
+      if alignVal.kind in nkIntLit..nkInt64Lit:
+        let alignment = int(alignVal.intVal)
+        if isPowerOfTwo(alignment) and alignment > 0:
+          # Set the field's alignment
+          s.alignment = max(s.alignment, alignment)
+          # Clear deferred flag and expression
+          s.excl sfDeferredAlign
+          s.alignExpr = nil
+        else:
+          localError(cl.c.config, s.alignExpr.info,
+            "alignment must be a power of two, got: " & $alignment)
+      else:
+        localError(cl.c.config, s.alignExpr.info,
+          "could not evaluate align expression to integer")
+
+  # Evaluate deferred size expression (for bitfields)
+  if sfDeferredSize in s.flags:
+    if s.sizeExpr != nil:
+      var hasUnresolved = false
+      var sizeExpr = replaceIdentsWithTypes(cl, s.sizeExpr, body, hasUnresolved)
+
+      if hasUnresolved:
+        return
+
+      let sizeVal = cl.c.semConstExpr(cl.c, sizeExpr)
+      if sizeVal.kind in nkIntLit..nkInt64Lit:
+        let size = int(sizeVal.intVal)
+        if size > 0:
+          s.bitsize = size
+          s.excl sfDeferredSize
+          s.sizeExpr = nil
+        else:
+          localError(cl.c.config, s.sizeExpr.info,
+            "bitfield size must be positive, got: " & $size)
+      else:
+        localError(cl.c.config, s.sizeExpr.info,
+          "could not evaluate size expression to integer")
 
 proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   # tyGenericInvocation[A, tyGenericInvocation[A, B]]
@@ -487,6 +679,18 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   cl.skipTypedesc = oldSkipTypedesc
   newbody.flags = newbody.flags + (t.flags + body.flags - tfInstClearedFlags)
   result.flags = result.flags + newbody.flags - tfInstClearedFlags
+
+  # Copy deferred pragma expressions from generic body to instantiated body
+  if tfDeferredSize in body.flags and body.sizeExpr != nil:
+    newbody.sizeExpr = body.sizeExpr
+    newbody.incl tfDeferredSize
+
+  if tfDeferredAlign in body.flags and body.alignExpr != nil:
+    newbody.alignExpr = body.alignExpr
+    newbody.incl tfDeferredAlign
+
+  # Evaluate deferred pragma expressions now that we have concrete types
+  evaluateDeferredPragmas(cl, newbody, body)
 
   setToPreviousLayer(cl.typeMap)
 
@@ -706,7 +910,7 @@ proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType, isInstValue = false): 
     if not cl.allowMetaTypes and result.n != nil and
         result.base.kind != tyNone:
       result.n = cl.c.semConstExpr(cl.c, result.n)
-      result.n.typ() = result.base
+      result.n.typ = result.base
 
   of tyGenericInst, tyUserTypeClassInst:
     bailout()

@@ -7835,12 +7835,27 @@ so that one can get the size of it at compile time even if it was declared witho
       echo sizeof(AtomicFlag)
   ```
 
+For generic imported types, the `size` pragma can use expressions involving `sizeof(T)`
+where `T` is a generic type parameter. The expression is evaluated when the generic type
+is instantiated:
+
+  ```Nim
+    type
+      Atomic*[T] {.importcpp: "std::atomic", size: sizeof(T).} = object
+
+    static:
+      doAssert sizeof(Atomic[int32]) == sizeof(int32)
+      doAssert sizeof(Atomic[int64]) == sizeof(int64)
+  ```
+
+This allows proper size specification for C++ template types without needing fake fields.
+
 
 Align pragma
 ------------
 
-The `align`:idx: pragma is for variables and object field members. It
-modifies the alignment requirement of the entity being declared. The
+The `align`:idx: pragma is for variables, object field members, and type definitions.
+It modifies the alignment requirement of the entity being declared. The
 argument must be a constant power of 2. Valid non-zero
 alignments that are weaker than other align pragmas on the same
 declaration are ignored. Alignments that are weaker than the
@@ -7848,6 +7863,10 @@ alignment requirement of the type are ignored.
 
   ```Nim
   type
+    # Type-level alignment
+    AlignedType {.align(16).} = object
+      x: int32
+
     sseType = object
       sseData {.align(16).}: array[4, float32]
 
@@ -7867,6 +7886,17 @@ alignment requirement of the type are ignored.
   ```
 
 This pragma has no effect on the JS backend.
+
+For generic imported types, the `align` pragma can use `alignof(T)` where `T` is a
+generic type parameter:
+
+  ```Nim
+    type
+      Atomic*[T] {.importcpp: "std::atomic", size: sizeof(T), align: alignof(T).} = object
+
+    static:
+      doAssert alignof(Atomic[int64]) == alignof(int64)
+  ```
 
 
 Noalias pragma
