@@ -72,7 +72,7 @@ const
     wRaises, wLocks, wTags, wForbids, wRequires, wEnsures, wEffectsOf,
     wGcSafe, wCodegenDecl, wNoInit, wCompileTime}
   typePragmas* = declPragmas + {wMagic, wAcyclic,
-    wPure, wHeader, wCompilerProc, wCore, wFinal, wSize, wShallow,
+    wPure, wHeader, wCompilerProc, wCore, wFinal, wSize, wAlign, wShallow,
     wIncompleteStruct, wCompleteStruct, wByCopy, wByRef,
     wInheritable, wGensym, wInject, wRequiresInit, wUnchecked, wUnion, wPacked,
     wCppNonPod, wBorrow, wGcSafe, wPartial, wExplain, wPackage, wCodegenDecl,
@@ -1012,11 +1012,60 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
             else:
               localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
       of wAlign:
-        let alignment = expectIntLit(c, it)
-        if isPowerOfTwo(alignment) and alignment > 0:
-          sym.alignment = max(sym.alignment, alignment)
+        if sym.kind == skType:
+          if sym.typ == nil: invalidPragma(c, it)
+          # TYPE LEVEL: Handle align pragma for types
+          let expr = if it.kind in nkPragmaCallKinds and it.len == 2: it[1] else: nil
+          if expr == nil:
+            localError(c.config, it.info, "align pragma requires an argument")
+          else:
+            if containsIdent(expr):
+              if sfImportc notin sym.flags:
+                localError(c.config, it.info,
+                  "deferred align expressions only supported for imported types")
+              else:
+                sym.typ.alignExpr = expr
+                sym.typ.incl tfDeferredAlign
+            else:
+              let exprCopy = expr.copyTree
+              let evaluated = c.semConstExpr(c, exprCopy)
+              if evaluated.kind in nkIntLit..nkInt64Lit:
+                let alignment = int(evaluated.intVal)
+                if isPowerOfTwo(alignment) and alignment > 0:
+                  sym.typ.align = int16(alignment)
+                else:
+                  localError(c.config, it.info, "power of two expected")
+              else:
+                localError(c.config, it.info, "align must be a compile-time constant integer")
+        elif sym.kind in {skField, skVar, skLet, skForVar}:
+          # FIELD LEVEL: Handle align pragma for fields with deferred support
+          let expr = if it.kind in nkPragmaCallKinds and it.len == 2: it[1] else: nil
+          if expr == nil:
+            localError(c.config, it.info, "align pragma requires an argument")
+          else:
+            # Try to evaluate immediately first
+            let exprCopy = expr.copyTree
+            let evaluated = c.semConstExpr(c, exprCopy)
+            if evaluated.kind in nkIntLit..nkInt64Lit:
+              # Successfully evaluated to a constant
+              let alignment = int(evaluated.intVal)
+              if isPowerOfTwo(alignment) and alignment > 0:
+                sym.alignment = max(sym.alignment, alignment)
+              else:
+                localError(c.config, it.info, "power of two expected")
+            elif containsIdent(expr):
+              # Could not evaluate, but contains identifiers - defer for generic instantiation
+              sym.alignExpr = expr
+              sym.incl sfDeferredAlign
+            else:
+              localError(c.config, it.info, "align must be a compile-time constant integer")
         else:
-          localError(c.config, it.info, "power of two expected")
+          # Fallback: simple integer parsing for other symbol kinds
+          let alignment = expectIntLit(c, it)
+          if isPowerOfTwo(alignment) and alignment > 0:
+            sym.alignment = max(sym.alignment, alignment)
+          else:
+            localError(c.config, it.info, "power of two expected")
       of wNodecl:
         noVal(c, it)
         sym.incl(lfNoDecl)

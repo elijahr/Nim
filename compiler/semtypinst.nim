@@ -9,7 +9,7 @@
 
 # This module does the instantiation of generic types.
 
-import std / tables
+import std / [tables, math]
 
 import ast, astalgo, msgs, types, magicsys, semdata, renderer, options,
   lineinfos, modulegraphs, layeredtable
@@ -488,6 +488,69 @@ proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
         localError(cl.c.config, t.sizeExpr.info,
           "could not evaluate size expression to integer")
 
+  if tfDeferredAlign in t.flags:
+    if t.alignExpr != nil:
+      # Replace identifiers with concrete types, then evaluate
+      var hasUnresolved = false
+      var alignExpr = replaceIdentsWithTypes(cl, t.alignExpr, body, hasUnresolved)
+
+      if hasUnresolved:
+        # Still in a nested generic context - don't evaluate yet
+        return
+
+      # Now evaluate with concrete types
+      let alignVal = cl.c.semConstExpr(cl.c, alignExpr)
+      if alignVal.kind in nkIntLit..nkInt64Lit:
+        let alignment = int(alignVal.intVal)
+        if isPowerOfTwo(alignment) and alignment > 0:
+          t.align = int16(alignment)
+          t.excl tfDeferredAlign
+          t.alignExpr = nil
+        else:
+          localError(cl.c.config, t.alignExpr.info,
+            "align must be a power of two")
+      else:
+        localError(cl.c.config, t.alignExpr.info,
+          "could not evaluate align expression to integer")
+
+proc evaluateDeferredFieldPragmas(cl: var TReplTypeVars, s: PSym, body: PType) =
+  ## Evaluates deferred align pragma expression on field symbols after generic instantiation.
+  ## This is called from replaceTypeVarsS when instantiating field symbols.
+  ## If the type params are still generic (nested generic context), we skip
+  ## evaluation and leave the flags set for later instantiation.
+
+  if s.kind != skField:
+    return
+
+  # Evaluate deferred align expression
+  if sfDeferredAlign in s.flags:
+    if s.alignExpr != nil:
+      # Replace generic param identifiers with concrete types
+      var hasUnresolved = false
+      var alignExpr = replaceIdentsWithTypes(cl, s.alignExpr, body, hasUnresolved)
+
+      if hasUnresolved:
+        # Still in a nested generic context - don't evaluate yet
+        # Keep the deferred expression and flag for next instantiation level
+        return
+
+      # Now evaluate the expression with concrete types
+      let alignVal = cl.c.semConstExpr(cl.c, alignExpr)
+      if alignVal.kind in nkIntLit..nkInt64Lit:
+        let alignment = int(alignVal.intVal)
+        if isPowerOfTwo(alignment) and alignment > 0:
+          # Set the field's alignment
+          s.alignment = max(s.alignment, alignment)
+          # Clear deferred flag and expression
+          s.excl sfDeferredAlign
+          s.alignExpr = nil
+        else:
+          localError(cl.c.config, s.alignExpr.info,
+            "align must be a power of two")
+      else:
+        localError(cl.c.config, s.alignExpr.info,
+          "align must be a compile-time constant integer, got: " & $alignVal.kind)
+
 proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   # tyGenericInvocation[A, tyGenericInvocation[A, B]]
   # is difficult to handle:
@@ -572,6 +635,10 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   if tfDeferredSize in body.flags and body.sizeExpr != nil:
     newbody.sizeExpr = body.sizeExpr
     newbody.incl tfDeferredSize
+
+  if tfDeferredAlign in body.flags and body.alignExpr != nil:
+    newbody.alignExpr = body.alignExpr
+    newbody.incl tfDeferredAlign
 
   # Evaluate deferred pragma expressions now that we have concrete types
   evaluateDeferredPragmas(cl, newbody, body)

@@ -1259,7 +1259,7 @@ proc genFlags*(s: set[TSymFlag]; dest: var string) =
     of sfCodegenDecl: dest.add "c5"
     of sfWasGenSym: dest.add "w0"
     of sfForceLift: dest.add "l"
-    of sfDeferredSize: dest.add "df1"
+    of sfDeferredAlign: dest.add "df0"
     of sfDirty: dest.add "d3"
     of sfCustomPragma: dest.add "c6"
     of sfBase: dest.add "b1"
@@ -1327,9 +1327,9 @@ proc parse*(t: typedesc[TSymFlag]; s: string): set[TSymFlag] =
         result.incl sfDirty
         inc i
       elif i+1 < s.len and s[i+1] == 'f':
-        # Handle "df1" for deferred field pragmas
-        if i+2 < s.len and s[i+2] == '1':
-          result.incl sfDeferredSize
+        # Handle "df0" for deferred field align pragma
+        if i+2 < s.len and s[i+2] == '0':
+          result.incl sfDeferredAlign
           inc i, 2
         else:
           inc i
@@ -1593,6 +1593,7 @@ proc genFlags*(s: set[TTypeFlag]; dest: var string) =
     of tfSendable: dest.add "s0"
     of tfImplicitStatic: dest.add "i6"
     of tfDeferredSize: dest.add "d0"
+    of tfDeferredAlign: dest.add "d1"
 
 
 proc parse*(t: typedesc[TTypeFlag]; s: string): set[TTypeFlag] =
@@ -1630,6 +1631,9 @@ proc parse*(t: typedesc[TTypeFlag]; s: string): set[TTypeFlag] =
     of 'd':
       if i+1 < s.len and s[i+1] == '0':
         result.incl tfDeferredSize
+        inc i
+      elif i+1 < s.len and s[i+1] == '1':
+        result.incl tfDeferredAlign
         inc i
       else: result.incl tfBorrowDot
     of 'e':

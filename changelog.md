@@ -64,6 +64,19 @@ errors.
 
 ## Language changes
 
+- The `align` pragma now supports deferred evaluation using `alignof(T)` expressions in generic
+  contexts, complementing the existing `size: sizeof(T)` support. Type definitions can now use
+  the `align` pragma directly (previously only fields supported it).
+
+  ```nim
+  type
+    GenericAtomic[T] {.importc, size: sizeof(T), align: alignof(T).} = object
+      value: T
+
+    Container[T] = object
+      data {.align: alignof(T).}: T
+  ```
+
 - An experimental option `--experimental:typeBoundOps` has been added that
   implements the RFC https://github.com/nim-lang/RFCs/issues/380.
   This makes the behavior of interfaces like `hash`, `$`, `==` etc. more
