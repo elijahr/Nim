@@ -143,6 +143,20 @@ proc `alignment=`*(s: PSym, val: int) {.inline.} =
   if s.state == Partial: loadSym(s)
   s.alignmentImpl = val
 
+proc sizeExpr*(s: PSym): PNode {.inline.} =
+  ## Returns the deferred size expression for a field symbol, or nil if none
+  if s.state == Partial: loadSym(s)
+  assert s.kind in {skLet, skVar, skField, skForVar},
+    "sizeExpr only valid for field-like symbols"
+  result = s.sizeExprImpl
+
+proc `sizeExpr=`*(s: PSym, val: PNode) {.inline.} =
+  ## Sets the deferred size expression for a field symbol
+  assert s.state != Sealed, "cannot modify sealed symbol"
+  assert s.kind in {skLet, skVar, skField, skForVar},
+    "sizeExpr only valid for field-like symbols"
+  s.sizeExprImpl = val
+
 proc magic*(s: PSym): TMagic {.inline.} =
   if s.state == Partial: loadSym(s)
   result = s.magicImpl
