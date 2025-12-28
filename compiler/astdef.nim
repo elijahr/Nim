@@ -127,6 +127,8 @@ type
     sfWasGenSym       # symbol was 'gensym'ed
     sfForceLift       # variable has to be lifted into closure environment
 
+    sfDeferredSize    # field has deferred size pragma expression
+
     sfDirty           # template is not hygienic (old styled template) module,
                       # compiled from a dirty-buffer
     sfCustomPragma    # symbol is custom pragma template
@@ -397,6 +399,7 @@ type
     tfIsOutParam
     tfSendable
     tfImplicitStatic
+    tfDeferredSize      # size pragma has deferred expression
 
   TTypeFlags* = set[TTypeFlag]
 
@@ -708,7 +711,8 @@ type
     of skLet, skVar, skField, skForVar:
       guardImpl*: PSym
       bitsizeImpl*: int
-      alignmentImpl*: int # for alignment
+      alignmentImpl*: int        # for alignment
+      sizeExprImpl*: PNode       # deferred size expression (nil = use bitsizeImpl)
     else: nil
     magicImpl*: TMagic
     typImpl*: PType
@@ -796,6 +800,7 @@ type
                               # -1 means that the size is unknown
     alignImpl*: int16             # the type's alignment requirements
     paddingAtEndImpl*: int16      #
+    sizeExprImpl*: PNode          # deferred size expression (nil = use sizeImpl)
     locImpl*: TLoc
     typeInstImpl*: PType          # for generic instantiations the tyGenericInst that led to this
                               # type.
