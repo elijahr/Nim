@@ -128,6 +128,7 @@ type
     sfForceLift       # variable has to be lifted into closure environment
 
     sfDeferredSize    # field has deferred size pragma expression
+    sfDeferredAlign   # field has deferred align pragma expression
 
     sfDirty           # template is not hygienic (old styled template) module,
                       # compiled from a dirty-buffer
@@ -400,6 +401,7 @@ type
     tfSendable
     tfImplicitStatic
     tfDeferredSize      # size pragma has deferred expression
+    tfDeferredAlign     # align pragma has deferred expression
 
   TTypeFlags* = set[TTypeFlag]
 
@@ -713,6 +715,7 @@ type
       bitsizeImpl*: int
       alignmentImpl*: int        # for alignment
       sizeExprImpl*: PNode       # deferred size expression (nil = use bitsizeImpl)
+      alignExprImpl*: PNode      # deferred align expression (nil = use alignmentImpl)
     else: nil
     magicImpl*: TMagic
     typImpl*: PType
@@ -801,6 +804,7 @@ type
     alignImpl*: int16             # the type's alignment requirements
     paddingAtEndImpl*: int16      #
     sizeExprImpl*: PNode          # deferred size expression (nil = use sizeImpl)
+    alignExprImpl*: PNode         # deferred align expression (nil = use alignImpl)
     locImpl*: TLoc
     typeInstImpl*: PType          # for generic instantiations the tyGenericInst that led to this
                               # type.
