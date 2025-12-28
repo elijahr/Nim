@@ -97,6 +97,22 @@ const
   allRoutinePragmas* = methodPragmas + iteratorPragmas + lambdaPragmas
   enumFieldPragmas* = {wDeprecated}
 
+proc containsIdent(n: PNode): bool =
+  ## Returns true if n contains any unresolved identifiers
+  result = false
+  if n == nil: return
+  case n.kind
+  of nkIdent:
+    result = true
+  of nkSym:
+    if n.sym != nil and n.sym.kind in {skGenericParam, skParam, skType}:
+      if n.sym.typ != nil and n.sym.typ.kind in {tyGenericParam, tyGenericInvocation}:
+        result = true
+  else:
+    for child in n:
+      if containsIdent(child):
+        return true
+
 proc getPragmaVal*(procAst: PNode; name: TSpecialWord): PNode =
   result = nil
   let p = procAst[pragmasPos]
@@ -946,20 +962,55 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         processImportObjC(c, sym, getOptionalStr(c, it, "$1"), it.info)
       of wSize:
         if sym.typ == nil: invalidPragma(c, it)
-        var size = expectIntLit(c, it)
-        if sfImportc in sym.flags:
-          # no restrictions on size for imported types
-          setImportedTypeSize(c.config, sym.typ, size)
-        else:
-          case size
-          of 1, 2, 4:
-            sym.typ.size = size
-            sym.typ.align = int16 size
-          of 8:
-            sym.typ.size = 8
-            sym.typ.align = floatInt64Align(c.config)
+        if sym.kind == skType:
+          # TYPE LEVEL: Handle size pragma for types
+          let expr = if it.kind in nkPragmaCallKinds and it.len == 2: it[1] else: nil
+          if expr == nil:
+            localError(c.config, it.info, "size pragma requires an argument")
           else:
-            localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
+            if containsIdent(expr):
+              if sfImportc notin sym.flags:
+                localError(c.config, it.info,
+                  "deferred size expressions only supported for imported types")
+              else:
+                sym.typ.sizeExpr = expr
+                sym.typ.incl tfDeferredSize
+            else:
+              let exprCopy = expr.copyTree
+              let evaluated = c.semConstExpr(c, exprCopy)
+              if evaluated.kind in nkIntLit..nkInt64Lit:
+                let size = int(evaluated.intVal)
+                if sfImportc in sym.flags:
+                  # no restrictions on size for imported types
+                  setImportedTypeSize(c.config, sym.typ, size)
+                else:
+                  case size
+                  of 1, 2, 4:
+                    sym.typ.size = size
+                    sym.typ.align = int16 size
+                  of 8:
+                    sym.typ.size = 8
+                    sym.typ.align = floatInt64Align(c.config)
+                  else:
+                    localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
+              else:
+                localError(c.config, it.info, "size must be a compile-time constant integer")
+        else:
+          # Fallback: simple integer parsing for non-type symbols
+          var size = expectIntLit(c, it)
+          if sfImportc in sym.flags:
+            # no restrictions on size for imported types
+            setImportedTypeSize(c.config, sym.typ, size)
+          else:
+            case size
+            of 1, 2, 4:
+              sym.typ.size = size
+              sym.typ.align = int16 size
+            of 8:
+              sym.typ.size = 8
+              sym.typ.align = floatInt64Align(c.config)
+            else:
+              localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
       of wAlign:
         let alignment = expectIntLit(c, it)
         if isPowerOfTwo(alignment) and alignment > 0:

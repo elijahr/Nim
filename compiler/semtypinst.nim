@@ -408,6 +408,86 @@ proc instCopyType*(cl: var TReplTypeVars, t: PType): PType =
       result.destructor = nil
       result.sink = nil
 
+proc replaceIdentsWithTypes(cl: var TReplTypeVars, n: PNode, body: PType, hasUnresolved: var bool): PNode =
+  ## Walks the expression and replaces identifier nodes with type symbols
+  ## based on the generic parameters in body and concrete types in typeMap.
+  ## Sets hasUnresolved to true if any generic param couldn't be resolved to a concrete type.
+  if n == nil: return nil
+
+  case n.kind
+  of nkIdent:
+    # Look for this identifier in the generic params
+    for i in FirstGenericParamAt..<body.kidsLen:
+      let param = body[i-1]
+      if param.sym != nil and param.sym.name.s == n.ident.s:
+        # Found matching generic param - get concrete type from typeMap
+        let concreteType = cl.typeMap.lookup(param)
+        if concreteType != nil:
+          # Check if it's still a generic param (nested generic context)
+          if concreteType.kind == tyGenericParam:
+            hasUnresolved = true
+            result = n
+            return
+          # Create a symbol node referencing the concrete type's symbol
+          if concreteType.sym != nil:
+            result = newSymNode(concreteType.sym, n.info)
+          else:
+            # For types without a symbol (like int), create a type node
+            result = newNodeIT(nkType, n.info, concreteType)
+          return
+    # Not a generic param, keep as-is
+    result = n
+  of nkSym:
+    # Check if it's a generic param symbol
+    if n.sym != nil and n.sym.typ != nil and n.sym.typ.kind == tyGenericParam:
+      let concreteType = cl.typeMap.lookup(n.sym.typ)
+      if concreteType != nil:
+        # Check if it's still a generic param (nested generic context)
+        if concreteType.kind == tyGenericParam:
+          hasUnresolved = true
+          result = n
+          return
+        if concreteType.sym != nil:
+          result = newSymNode(concreteType.sym, n.info)
+        else:
+          result = newNodeIT(nkType, n.info, concreteType)
+        return
+    result = copyNode(n)
+    result.typ = replaceTypeVarsT(cl, n.typ)
+  of nkCharLit..nkNilLit:
+    # Literals don't have children
+    result = copyNode(n)
+  else:
+    result = copyNode(n)
+    result.typ = if n.typ != nil: replaceTypeVarsT(cl, n.typ) else: nil
+    for i in 0..<n.len:
+      result.add replaceIdentsWithTypes(cl, n[i], body, hasUnresolved)
+
+proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
+  ## Evaluates deferred pragma expressions after generic instantiation.
+  ## If the type params are still generic (nested generic context), we skip
+  ## evaluation and leave the flag set for later.
+  if tfDeferredSize in t.flags:
+    if t.sizeExpr != nil:
+      # Replace identifiers with concrete types, then evaluate
+      var hasUnresolved = false
+      var sizeExpr = replaceIdentsWithTypes(cl, t.sizeExpr, body, hasUnresolved)
+
+      if hasUnresolved:
+        # Still in a nested generic context - don't evaluate yet
+        return
+
+      # Now evaluate with concrete types
+      let sizeVal = cl.c.semConstExpr(cl.c, sizeExpr)
+      if sizeVal.kind in nkIntLit..nkInt64Lit:
+        let size = int(sizeVal.intVal)
+        setImportedTypeSize(cl.c.config, t, size)
+        t.excl tfDeferredSize
+        t.sizeExpr = nil
+      else:
+        localError(cl.c.config, t.sizeExpr.info,
+          "could not evaluate size expression to integer")
+
 proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   # tyGenericInvocation[A, tyGenericInvocation[A, B]]
   # is difficult to handle:
@@ -487,6 +567,14 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   cl.skipTypedesc = oldSkipTypedesc
   newbody.flags = newbody.flags + (t.flags + body.flags - tfInstClearedFlags)
   result.flags = result.flags + newbody.flags - tfInstClearedFlags
+
+  # Copy deferred pragma expressions from generic body to instantiated body
+  if tfDeferredSize in body.flags and body.sizeExpr != nil:
+    newbody.sizeExpr = body.sizeExpr
+    newbody.incl tfDeferredSize
+
+  # Evaluate deferred pragma expressions now that we have concrete types
+  evaluateDeferredPragmas(cl, newbody, body)
 
   setToPreviousLayer(cl.typeMap)
 

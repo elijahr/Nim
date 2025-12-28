@@ -1584,6 +1584,7 @@ proc genFlags*(s: set[TTypeFlag]; dest: var string) =
     of tfIsOutParam: dest.add "i5"
     of tfSendable: dest.add "s0"
     of tfImplicitStatic: dest.add "i6"
+    of tfDeferredSize: dest.add "d0"
 
 
 proc parse*(t: typedesc[TTypeFlag]; s: string): set[TTypeFlag] =
@@ -1618,7 +1619,11 @@ proc parse*(t: typedesc[TTypeFlag]; s: string): set[TTypeFlag] =
         result.incl tfCompleteStruct
         inc i
       else: result.incl tfCapturesEnv
-    of 'd': result.incl tfBorrowDot
+    of 'd':
+      if i+1 < s.len and s[i+1] == '0':
+        result.incl tfDeferredSize
+        inc i
+      else: result.incl tfBorrowDot
     of 'e':
       if i+1 < s.len and s[i+1] == '0':
         result.incl tfExplicit
