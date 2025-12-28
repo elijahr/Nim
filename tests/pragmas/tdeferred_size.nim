@@ -77,3 +77,5 @@ when defined(cpp):
     doAssert sizeof(CppAtomic[int16]) == 2
     doAssert sizeof(CppAtomic[int32]) == 4
     doAssert sizeof(CppAtomic[int64]) == 8
+
+echo "All deferred size pragma tests passed!"
