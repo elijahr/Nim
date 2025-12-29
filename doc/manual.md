@@ -7873,6 +7873,30 @@ so that one can get the size of it at compile time even if it was declared witho
       echo sizeof(AtomicFlag)
   ```
 
+For generic imported types, the `size` pragma accepts expressions involving type parameters:
+
+  ```Nim
+  type
+    # Size based on generic parameter
+    CppAtomic[T] {.importcpp: "std::atomic", header: "<atomic>",
+                   size: sizeof(T), completeStruct.} = object
+
+    # Complex expressions are supported
+    PaddedWrapper[T] {.importc, size: sizeof(T) + 4, completeStruct.} = object
+
+    # Multiple type parameters
+    Pair[A, B] {.importc, size: sizeof(A) + sizeof(B), completeStruct.} = object
+
+  static:
+    doAssert sizeof(CppAtomic[int32]) == 4
+    doAssert sizeof(PaddedWrapper[int8]) == 5
+    doAssert sizeof(Pair[int32, int64]) == 12
+  ```
+
+The expression is evaluated when the generic type is instantiated. The
+`completeStruct` pragma is typically used with these declarations to enable
+compile-time size queries.
+
 
 Align pragma
 ------------
@@ -7905,6 +7929,26 @@ alignment requirement of the type are ignored.
   ```
 
 This pragma has no effect on the JS backend.
+
+For generic types and fields, the `align` pragma accepts expressions involving
+type parameters:
+
+  ```Nim
+  type
+    # Type-level alignment based on generic parameter
+    GenericAligned[T] {.importc, size: sizeof(T),
+                        align: alignof(T), completeStruct.} = object
+
+    # Field-level alignment
+    Container[T] = object
+      header: int32
+      data {.align: alignof(T).}: T
+
+  static:
+    doAssert alignof(GenericAligned[int64]) >= alignof(int64)
+  ```
+
+The expression is evaluated when the generic type is instantiated.
 
 
 Noalias pragma
@@ -8008,6 +8052,20 @@ during C code generation.
 Without `completeStruct`, attempting to use `sizeof` on an `importc` type
 at compile-time will error with "'sizeof' requires '.importc' types to be
 '.completeStruct'".
+
+The `completeStruct` pragma is especially useful with generic types that use
+expression-based `size` and `align` pragmas:
+
+  ```Nim
+  type
+    CppAtomic[T] {.importcpp: "std::atomic", header: "<atomic>",
+                   size: sizeof(T), align: alignof(T),
+                   completeStruct.} = object
+  ```
+
+Without `completeStruct`, the compiler would not trust the provided size
+information for compile-time queries. The pragma tells the compiler to use
+the `size` and `align` values for `sizeof` and `alignof` operations.
 
 
 Compile pragma
@@ -8783,6 +8841,27 @@ The string literal passed to `importc` can be a format string:
 
 In the example, the external name of `p` is set to `prefixp`. Only ``$1``
 is available and a literal dollar sign must be written as ``$$``.
+
+For generic types, the `importc` pragma accepts compile-time functions that
+compute the C identifier based on type parameters:
+
+  ```Nim
+  proc cTypeName(T: typedesc): string {.compileTime.} =
+    when T is int8: "int8_t"
+    elif T is int16: "int16_t"
+    elif T is int32: "int32_t"
+    elif T is int64: "int64_t"
+    else: "int"
+
+  type
+    CInt[T] {.importc: cTypeName(T), size: sizeof(T), completeStruct.} = object
+
+  # Each instantiation imports the corresponding C type
+  var i8: CInt[int8]   # imports "int8_t"
+  var i32: CInt[int32] # imports "int32_t"
+  ```
+
+This allows wrapping families of related C types with a single generic Nim type.
 
 
 Exportc pragma

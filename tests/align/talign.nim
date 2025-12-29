@@ -67,3 +67,21 @@ block: # bug #22419
 
   f()()
 
+block: # type-level align pragma (for imported types)
+  # The align pragma on type definitions sets the type's alignment
+  type
+    AlignedImport16 {.importc: "int", size: 4, align: 16, completeStruct.} = object
+  doAssert alignof(AlignedImport16) == 16
+  doAssert sizeof(AlignedImport16) == 4
+
+  type
+    AlignedImport32 {.importc: "long long", size: 8, align: 32, completeStruct.} = object
+  doAssert alignof(AlignedImport32) == 32
+  doAssert sizeof(AlignedImport32) == 8
+
+  # Combined with size for complete imported type specification
+  type
+    CustomAligned {.importc: "char", size: 1, align: 8, completeStruct.} = object
+  doAssert alignof(CustomAligned) == 8
+  doAssert sizeof(CustomAligned) == 1
+
