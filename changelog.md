@@ -68,6 +68,35 @@ errors.
 
 ## Language changes
 
+- The `size`, `align`, `importc`, and `importcpp` pragmas now support deferred evaluation
+  of expressions containing generic type parameters. Expressions are evaluated during
+  generic instantiation. Type definitions can now use the `align` pragma directly
+  (previously only fields supported it).
+
+  ```nim
+  # Size and alignment based on generic parameter
+  type
+    GenericAtomic[T] {.importcpp: "std::atomic", header: "<atomic>",
+                       size: sizeof(T), align: alignof(T), completeStruct.} = object
+
+  # Field-level alignment
+  type
+    Container[T] = object
+      data {.align: alignof(T).}: T
+
+  # Computed C type names
+  proc cTypeName(T: typedesc): string {.compileTime.} =
+    when T is int32: "int" else: "long long"
+
+  type CInt[T] {.importc: cTypeName(T), size: sizeof(T), completeStruct.} = object
+
+  static:
+    doAssert sizeof(GenericAtomic[int32]) == 4
+    doAssert sizeof(GenericAtomic[int64]) == 8
+  ```
+
+  Use `defined(nimHasDeferredPragmas)` to check for this feature.
+
 - An experimental option `--experimental:typeBoundOps` has been added that
   implements the RFC https://github.com/nim-lang/RFCs/issues/380.
   This makes the behavior of interfaces like `hash`, `$`, `==` etc. more

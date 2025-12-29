@@ -72,7 +72,7 @@ const
     wRaises, wLocks, wTags, wForbids, wRequires, wEnsures, wEffectsOf,
     wGcSafe, wCodegenDecl, wNoInit, wCompileTime}
   typePragmas* = declPragmas + {wMagic, wAcyclic,
-    wPure, wHeader, wCompilerProc, wCore, wFinal, wSize, wShallow,
+    wPure, wHeader, wCompilerProc, wCore, wFinal, wSize, wAlign, wShallow,
     wIncompleteStruct, wCompleteStruct, wByCopy, wByRef,
     wInheritable, wGensym, wInject, wRequiresInit, wUnchecked, wUnion, wPacked,
     wCppNonPod, wBorrow, wGcSafe, wPartial, wExplain, wPackage, wCodegenDecl,
@@ -97,6 +97,38 @@ const
   allRoutinePragmas* = methodPragmas + iteratorPragmas + lambdaPragmas
   enumFieldPragmas* = {wDeprecated}
 
+proc containsUnresolvedIdent(c: PContext, n: PNode): bool =
+  ## Returns true if n contains any identifiers that cannot be resolved in scope.
+  ## Unresolved identifiers indicate potential generic params that haven't been
+  ## added to scope yet (pragmas are processed before generic params in typeDefLeftSidePass).
+  result = false
+  if n == nil: return
+  case n.kind
+  of nkIdent:
+    # Look up the identifier in scope
+    var ambiguous = false
+    let sym = searchInScopes(c, n.ident, ambiguous)
+    if sym == nil:
+      # Identifier not found in scope - likely a generic param
+      result = true
+    elif sym.kind == skGenericParam:
+      # Explicitly a generic param
+      result = true
+    elif sym.kind == skType and sym.typ != nil and sym.typ.kind == tyGenericParam:
+      # Type symbol representing a generic param
+      result = true
+  of nkSym:
+    # Already resolved symbol - check if it's a generic param
+    if n.sym != nil:
+      if n.sym.kind == skGenericParam:
+        result = true
+      elif n.sym.kind == skType and n.sym.typ != nil and n.sym.typ.kind == tyGenericParam:
+        result = true
+  else:
+    for child in n:
+      if containsUnresolvedIdent(c, child):
+        return true
+
 proc getPragmaVal*(procAst: PNode; name: TSpecialWord): PNode =
   result = nil
   let p = procAst[pragmasPos]
@@ -118,6 +150,59 @@ proc recordPragma(c: PContext; n: PNode; args: varargs[string]) =
 const
   errStringLiteralExpected = "string literal expected"
   errIntLiteralExpected = "integer literal expected"
+  # Centralized deferred pragma error messages
+  errPragmaRequiresArgument = "$1 pragma requires an argument"
+  errDeferredOnlyForImported = "deferred $1 expressions only supported for imported types"
+  errMustBeConstantInteger = "$1 must be a compile-time constant integer"
+  errMustBeConstantString = "$1 must be a compile-time constant string"
+  errAlignMustBePowerOfTwo = "align must be a power of two"
+
+proc deferOrEvaluate(c: PContext, sym: PSym, it: PNode,
+                     word: TSpecialWord, requireImportc: bool): bool =
+  ## Generic helper: decides whether to defer or evaluate a pragma expression.
+  ## Returns true if expression was deferred, false if it should be evaluated immediately.
+  ## Handles nil checks, validation, and error reporting.
+  ##
+  ## Args:
+  ##   c: Semantic context
+  ##   sym: Symbol being processed (must have .typ for types, or be a field symbol)
+  ##   it: The pragma node
+  ##   word: Pragma word (wSize, wAlign, etc.)
+  ##   requireImportc: If true, deferred expressions require sfImportc flag
+  ##
+  ## Returns:
+  ##   true = expression was deferred (caller should return)
+  ##   false = expression is ready for immediate evaluation (caller continues)
+
+  # Extract expression argument
+  let expr = if it.kind in nkPragmaCallKinds and it.len == 2: it[1] else: nil
+
+  if expr == nil:
+    localError(c.config, it.info, errPragmaRequiresArgument % $word)
+    return true  # Caller should stop processing
+
+  # Check if expression contains unresolved generic parameters
+  if containsUnresolvedIdent(c, expr):
+    # Expression needs deferral
+    if requireImportc:
+      let hasImportc = if sym.kind in {skLet, skVar, skField, skForVar}:
+                         false  # Fields don't have importc
+                       else:
+                         sfImportc in sym.flags
+      if not hasImportc:
+        localError(c.config, it.info, errDeferredOnlyForImported % $word)
+        return true
+
+    # Store deferred expression
+    if sym.kind in {skLet, skVar, skField, skForVar}:
+      sym.setDeferredExpr(word, expr)
+    else:
+      sym.typ.setDeferredExpr(word, expr)
+
+    return true  # Expression deferred, caller returns
+
+  # Expression is ready for immediate evaluation
+  return false
 
 proc invalidPragma*(c: PContext; n: PNode) =
   localError(c.config, n.info, "invalid pragma: " & renderTree(n, {renderNoComments}))
@@ -222,6 +307,17 @@ proc getStrLitNode(c: PContext, n: PNode): PNode =
 proc expectStrLit(c: PContext, n: PNode): string =
   result = getStrLitNode(c, n).strVal
 
+template expectString(c: PContext, n: PNode, info: TLineInfo,
+                      pragmaName: string): string =
+  ## Validates that n evaluates to a string constant.
+  ## Returns the string value or "" on error.
+  var resultStr = ""
+  if n.kind in {nkStrLit, nkRStrLit, nkTripleStrLit}:
+    resultStr = n.strVal
+  else:
+    localError(c.config, info, errMustBeConstantString % pragmaName)
+  resultStr
+
 proc expectIntLit(c: PContext, n: PNode): int =
   result = 0
   if n.kind notin nkPragmaCallKinds or n.len != 2:
@@ -231,6 +327,37 @@ proc expectIntLit(c: PContext, n: PNode): int =
     case n[1].kind
     of nkIntLit..nkInt64Lit: result = int(n[1].intVal)
     else: localError(c.config, n.info, errIntLiteralExpected)
+
+# Overload 1: Simple integer extraction (no validation)
+template expectInt(c: PContext, n: PNode, info: TLineInfo,
+                   pragmaName: string): int =
+  ## Validates that n is an integer constant. Returns value or 0 on error.
+  var resultVal = 0
+  if n.kind in nkIntLit..nkInt64Lit:
+    resultVal = int(n.intVal)
+  else:
+    localError(c.config, info, errMustBeConstantInteger % pragmaName)
+  resultVal
+
+# Overload 2: Integer extraction with validation block
+# Uses {.dirty.} to inject `val` into caller scope for the validator block
+# NOTE: Uses `val` (not `it`) to avoid shadowing the pragma node variable
+template expectIntValidated(c: PContext, n: PNode, info: TLineInfo,
+                            pragmaName: string, errMsg: string,
+                            validator: untyped): int {.dirty.} =
+  ## Validates that n is an integer constant AND passes validator.
+  ## The validator block receives `val` as the integer value.
+  ## Returns value or 0 on error.
+  var resultVal = 0
+  if n.kind in nkIntLit..nkInt64Lit:
+    let val {.inject.} = int(n.intVal)
+    if validator:
+      resultVal = val
+    else:
+      localError(c.config, info, errMsg)
+  else:
+    localError(c.config, info, errMustBeConstantInteger % pragmaName)
+  resultVal
 
 proc getOptionalStr(c: PContext, n: PNode, defaultStr: string): string =
   if n.kind in nkPragmaCallKinds: result = expectStrLit(c, n)
@@ -910,10 +1037,33 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
             incl(sym, sfMangleCpp)
         incl(sym.flagsImpl, sfUsed) # avoid wrong hints
       of wImportc:
-        let name = getOptionalStr(c, it, "$1")
-        cppDefine(c.config, name)
-        recordPragma(c, it, "cppdefine", name)
-        makeExternImport(c, sym, name, it.info)
+        if sym.kind == skType and sym.typ != nil:
+          # TYPE LEVEL - special handling for default "$1"
+          let defaultName = "$1"
+          let exprOrDefault = if it.kind in nkPragmaCallKinds and it.len == 2:
+                                it[1]
+                              else:
+                                newStrNode(nkStrLit, defaultName)
+
+          if containsUnresolvedIdent(c, exprOrDefault):
+            # Defer evaluation
+            sym.typ.setDeferredExpr(wImportc, exprOrDefault)
+            sym.incl(sfImportc)
+            sym.excl(sfForward)
+          else:
+            # Immediate evaluation
+            let evaluated = c.semConstExpr(c, exprOrDefault.copyTree)
+            let name = expectString(c, evaluated, it.info, "importc")
+            if name != "":
+              cppDefine(c.config, name)
+              recordPragma(c, it, "cppdefine", name)
+              makeExternImport(c, sym, name, it.info)
+        else:
+          # SYMBOL LEVEL (unchanged)
+          let name = getOptionalStr(c, it, "$1")
+          cppDefine(c.config, name)
+          recordPragma(c, it, "cppdefine", name)
+          makeExternImport(c, sym, name, it.info)
       of wImportCompilerProc:
         let name = getOptionalStr(c, it, "$1")
         cppDefine(c.config, name)
@@ -930,7 +1080,33 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         if sym.kind == skTemplate: incl(sym, sfCallsite)
         else: invalidPragma(c, it)
       of wImportCpp:
-        processImportCpp(c, sym, getOptionalStr(c, it, "$1"), it.info)
+        if sym.kind == skType and sym.typ != nil:
+          # TYPE LEVEL - special handling for default "$1"
+          let defaultName = "$1"
+          let exprOrDefault = if it.kind in nkPragmaCallKinds and it.len == 2:
+                                it[1]
+                              else:
+                                newStrNode(nkStrLit, defaultName)
+
+          if containsUnresolvedIdent(c, exprOrDefault):
+            # Defer evaluation
+            sym.typ.setDeferredExpr(wImportCpp, exprOrDefault)
+            sym.incl(sfImportc)
+            sym.incl(sfInfixCall)
+            sym.excl(sfForward)
+            if c.config.backend == backendC:
+              let m = sym.getModule()
+              incl(m.flagsImpl, sfCompileToCpp)
+            incl c.config.globalOptions, optMixedMode
+          else:
+            # Immediate evaluation
+            let evaluated = c.semConstExpr(c, exprOrDefault.copyTree)
+            let name = expectString(c, evaluated, it.info, "importcpp")
+            if name != "":
+              processImportCpp(c, sym, name, it.info)
+        else:
+          # SYMBOL LEVEL (unchanged)
+          processImportCpp(c, sym, getOptionalStr(c, it, "$1"), it.info)
       of wCppNonPod:
         incl(sym, sfCppNonPod)
       of wImportJs:
@@ -946,26 +1122,85 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         processImportObjC(c, sym, getOptionalStr(c, it, "$1"), it.info)
       of wSize:
         if sym.typ == nil: invalidPragma(c, it)
-        var size = expectIntLit(c, it)
-        if sfImportc in sym.flags:
-          # no restrictions on size for imported types
-          setImportedTypeSize(c.config, sym.typ, size)
+        if sym.kind == skType:
+          # Use generic helper for defer-or-evaluate decision
+          if deferOrEvaluate(c, sym, it, wSize, requireImportc = true):
+            return  # Expression was deferred or had an error
+
+          # Immediate evaluation - extract and validate
+          let expr = it[1]  # We know it exists (deferOrEvaluate checked)
+          let evaluated = c.semConstExpr(c, expr.copyTree)
+          let size = expectInt(c, evaluated, it.info, "size")
+
+          if size > 0:
+            # PRAGMA-SPECIFIC APPLICATION LOGIC
+            if sfImportc in sym.flags:
+              setImportedTypeSize(c.config, sym.typ, size)
+            else:
+              case size
+              of 1, 2, 4:
+                sym.typ.size = size
+                sym.typ.align = int16 size
+              of 8:
+                sym.typ.size = 8
+                sym.typ.align = floatInt64Align(c.config)
+              else:
+                localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
         else:
-          case size
-          of 1, 2, 4:
-            sym.typ.size = size
-            sym.typ.align = int16 size
-          of 8:
-            sym.typ.size = 8
-            sym.typ.align = floatInt64Align(c.config)
+          # Fallback: simple integer parsing for non-type symbols
+          var size = expectIntLit(c, it)
+          if sfImportc in sym.flags:
+            setImportedTypeSize(c.config, sym.typ, size)
           else:
-            localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
+            case size
+            of 1, 2, 4:
+              sym.typ.size = size
+              sym.typ.align = int16 size
+            of 8:
+              sym.typ.size = 8
+              sym.typ.align = floatInt64Align(c.config)
+            else:
+              localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
       of wAlign:
-        let alignment = expectIntLit(c, it)
-        if isPowerOfTwo(alignment) and alignment > 0:
-          sym.alignment = max(sym.alignment, alignment)
+        if sym.kind == skType:
+          if sym.typ == nil: invalidPragma(c, it)
+
+          # Use generic helper
+          if deferOrEvaluate(c, sym, it, wAlign, requireImportc = true):
+            return
+
+          # Immediate evaluation
+          let expr = it[1]
+          let evaluated = c.semConstExpr(c, expr.copyTree)
+          let alignment = expectIntValidated(c, evaluated, it.info, "align",
+                                             errAlignMustBePowerOfTwo):
+            isPowerOfTwo(val) and val > 0
+
+          if alignment > 0:
+            sym.typ.align = int16(alignment)
+
+        elif sym.kind in {skField, skVar, skLet, skForVar}:
+          # Use generic helper (no importc requirement for fields)
+          if deferOrEvaluate(c, sym, it, wAlign, requireImportc = false):
+            return
+
+          # Immediate evaluation
+          let expr = it[1]
+          let evaluated = c.semConstExpr(c, expr.copyTree)
+          let alignment = expectIntValidated(c, evaluated, it.info, "align",
+                                             errAlignMustBePowerOfTwo):
+            isPowerOfTwo(val) and val > 0
+
+          if alignment > 0:
+            sym.alignment = max(sym.alignment, alignment)
+
         else:
-          localError(c.config, it.info, "power of two expected")
+          # Fallback: simple integer parsing
+          let alignment = expectIntLit(c, it)
+          if isPowerOfTwo(alignment) and alignment > 0:
+            sym.alignment = max(sym.alignment, alignment)
+          else:
+            localError(c.config, it.info, errAlignMustBePowerOfTwo)
       of wNodecl:
         noVal(c, it)
         sym.incl(lfNoDecl)
