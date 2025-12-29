@@ -411,6 +411,15 @@ proc `alignExpr=`*(t: PType, val: PNode) {.inline.} =
   if t.state == Partial: loadType(t)
   t.alignExprImpl = val
 
+proc importcExpr*(t: PType): PNode {.inline.} =
+  if t.state == Partial: loadType(t)
+  result = t.importcExprImpl
+
+proc `importcExpr=`*(t: PType, val: PNode) {.inline.} =
+  assert t.state != Sealed
+  if t.state == Partial: loadType(t)
+  t.importcExprImpl = val
+
 proc paddingAtEnd*(t: PType): int16 {.inline.} =
   if t.state == Partial: loadType(t)
   result = t.paddingAtEndImpl

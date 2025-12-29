@@ -9,10 +9,10 @@
 
 # This module does the instantiation of generic types.
 
-import std / [tables, math]
+import std / [tables, math, strutils]
 
 import ast, astalgo, msgs, types, magicsys, semdata, renderer, options,
-  lineinfos, modulegraphs, layeredtable
+  lineinfos, modulegraphs, layeredtable, ropes
 
 when defined(nimPreviewSlimSystem):
   import std/assertions
@@ -428,12 +428,17 @@ proc replaceIdentsWithTypes(cl: var TReplTypeVars, n: PNode, body: PType, hasUnr
             hasUnresolved = true
             result = n
             return
-          # Create a symbol node referencing the concrete type's symbol
-          if concreteType.sym != nil:
-            result = newSymNode(concreteType.sym, n.info)
+          # For static params, create a value node; for type params, wrap in typedesc
+          if concreteType.kind == tyStatic:
+            # Static parameter - use the value directly
+            if concreteType.n != nil:
+              result = concreteType.n.copyTree
+            else:
+              result = n
           else:
-            # For types without a symbol (like int), create a type node
-            result = newNodeIT(nkType, n.info, concreteType)
+            # Type parameter - wrap in typedesc so it matches typedesc parameters
+            let typeDescType = makeTypeDesc(cl.c, concreteType)
+            result = newNodeIT(nkType, n.info, typeDescType)
           return
     # Not a generic param, keep as-is
     result = n
@@ -447,10 +452,17 @@ proc replaceIdentsWithTypes(cl: var TReplTypeVars, n: PNode, body: PType, hasUnr
           hasUnresolved = true
           result = n
           return
-        if concreteType.sym != nil:
-          result = newSymNode(concreteType.sym, n.info)
+        # For static params, create a value node; for type params, wrap in typedesc
+        if concreteType.kind == tyStatic:
+          # Static parameter - use the value directly
+          if concreteType.n != nil:
+            result = concreteType.n.copyTree
+          else:
+            result = n
         else:
-          result = newNodeIT(nkType, n.info, concreteType)
+          # Type parameter - wrap in typedesc so it matches typedesc parameters
+          let typeDescType = makeTypeDesc(cl.c, concreteType)
+          result = newNodeIT(nkType, n.info, typeDescType)
         return
     result = copyNode(n)
     result.typ = replaceTypeVarsT(cl, n.typ)
@@ -512,6 +524,39 @@ proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
       else:
         localError(cl.c.config, t.alignExpr.info,
           "could not evaluate align expression to integer")
+
+  if tfDeferredImportc in t.flags:
+    if t.importcExpr != nil and t.sym != nil:
+      # Replace identifiers with concrete types, then evaluate
+      var hasUnresolved = false
+      var importcExpr = replaceIdentsWithTypes(cl, t.importcExpr, body, hasUnresolved)
+
+      if hasUnresolved:
+        # Still in a nested generic context - don't evaluate yet
+        return
+
+      # Now evaluate with concrete types using the semConstExpr function pointer
+      let importcVal = cl.c.semConstExpr(cl.c, importcExpr)
+      if importcVal.kind in {nkStrLit, nkRStrLit, nkTripleStrLit}:
+        let name = importcVal.strVal
+        # Set the extern name on the symbol
+        if '$' notin name:
+          t.sym.setSnippet(rope(name))
+        elif name == "$1":
+          t.sym.setSnippet(rope(t.sym.name.s))
+        else:
+          try:
+            t.sym.setSnippet(rope(name % t.sym.name.s))
+          except ValueError:
+            localError(cl.c.config, t.importcExpr.info,
+              "invalid extern name: '" & name & "'. (Forgot to escape '$'?)")
+        when hasFFI:
+          t.sym.cname = $t.sym.loc.snippet
+        t.excl tfDeferredImportc
+        t.importcExpr = nil
+      else:
+        localError(cl.c.config, t.importcExpr.info,
+          "could not evaluate importc expression to string")
 
 proc evaluateDeferredFieldPragmas(cl: var TReplTypeVars, s: PSym, body: PType) =
   ## Evaluates deferred align pragma expression on field symbols after generic instantiation.
@@ -639,6 +684,10 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   if tfDeferredAlign in body.flags and body.alignExpr != nil:
     newbody.alignExpr = body.alignExpr
     newbody.incl tfDeferredAlign
+
+  if tfDeferredImportc in body.flags and body.importcExpr != nil:
+    newbody.importcExpr = body.importcExpr
+    newbody.incl tfDeferredImportc
 
   # Evaluate deferred pragma expressions now that we have concrete types
   evaluateDeferredPragmas(cl, newbody, body)

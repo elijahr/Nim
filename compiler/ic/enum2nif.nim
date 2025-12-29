@@ -1594,6 +1594,7 @@ proc genFlags*(s: set[TTypeFlag]; dest: var string) =
     of tfImplicitStatic: dest.add "i6"
     of tfDeferredSize: dest.add "d0"
     of tfDeferredAlign: dest.add "d1"
+    of tfDeferredImportc: dest.add "d2"
 
 
 proc parse*(t: typedesc[TTypeFlag]; s: string): set[TTypeFlag] =
@@ -1634,6 +1635,9 @@ proc parse*(t: typedesc[TTypeFlag]; s: string): set[TTypeFlag] =
         inc i
       elif i+1 < s.len and s[i+1] == '1':
         result.incl tfDeferredAlign
+        inc i
+      elif i+1 < s.len and s[i+1] == '2':
+        result.incl tfDeferredImportc
         inc i
       else: result.incl tfBorrowDot
     of 'e':

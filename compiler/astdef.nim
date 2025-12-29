@@ -401,6 +401,7 @@ type
     tfImplicitStatic
     tfDeferredSize      # size pragma has deferred expression
     tfDeferredAlign     # align pragma has deferred expression
+    tfDeferredImportc   # importc/importcpp pragma has deferred expression
 
   TTypeFlags* = set[TTypeFlag]
 
@@ -714,6 +715,7 @@ type
       bitsizeImpl*: int
       alignmentImpl*: int        # for alignment
       alignExprImpl*: PNode      # deferred align expression (nil = use alignmentImpl)
+      importcExprImpl*: PNode    # deferred importc/importcpp expression (nil = use loc.snippet)
     else: nil
     magicImpl*: TMagic
     typImpl*: PType
@@ -803,6 +805,7 @@ type
     paddingAtEndImpl*: int16      #
     sizeExprImpl*: PNode          # deferred size expression (nil = use sizeImpl)
     alignExprImpl*: PNode         # deferred align expression (nil = use alignImpl)
+    importcExprImpl*: PNode       # deferred importc/importcpp expression (nil = use sym.loc.snippet)
     locImpl*: TLoc
     typeInstImpl*: PType          # for generic instantiations the tyGenericInst that led to this
                               # type.

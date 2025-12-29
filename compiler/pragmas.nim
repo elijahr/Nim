@@ -926,10 +926,38 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
             incl(sym, sfMangleCpp)
         incl(sym.flagsImpl, sfUsed) # avoid wrong hints
       of wImportc:
-        let name = getOptionalStr(c, it, "$1")
-        cppDefine(c.config, name)
-        recordPragma(c, it, "cppdefine", name)
-        makeExternImport(c, sym, name, it.info)
+        if sym.kind == skType and sym.typ != nil:
+          # TYPE LEVEL: Handle importc pragma for types
+          let expr = if it.kind in nkPragmaCallKinds and it.len == 2: it[1] else: nil
+          if expr == nil:
+            # No argument, use default "$1"
+            let name = "$1"
+            cppDefine(c.config, name)
+            recordPragma(c, it, "cppdefine", name)
+            makeExternImport(c, sym, name, it.info)
+          else:
+            if containsIdent(expr):
+              # Deferred importc expression with identifiers
+              sym.typ.importcExpr = expr
+              sym.typ.incl tfDeferredImportc
+              sym.incl(sfImportc)
+              sym.excl(sfForward)
+            else:
+              # Can evaluate immediately
+              let evaluated = c.semConstExpr(c, expr.copyTree)
+              if evaluated.kind in {nkStrLit, nkRStrLit, nkTripleStrLit}:
+                let name = evaluated.strVal
+                cppDefine(c.config, name)
+                recordPragma(c, it, "cppdefine", name)
+                makeExternImport(c, sym, name, it.info)
+              else:
+                localError(c.config, it.info, "importc pragma requires a string expression")
+        else:
+          # SYMBOL LEVEL: Original behavior
+          let name = getOptionalStr(c, it, "$1")
+          cppDefine(c.config, name)
+          recordPragma(c, it, "cppdefine", name)
+          makeExternImport(c, sym, name, it.info)
       of wImportCompilerProc:
         let name = getOptionalStr(c, it, "$1")
         cppDefine(c.config, name)
@@ -946,7 +974,34 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         if sym.kind == skTemplate: incl(sym, sfCallsite)
         else: invalidPragma(c, it)
       of wImportCpp:
-        processImportCpp(c, sym, getOptionalStr(c, it, "$1"), it.info)
+        if sym.kind == skType and sym.typ != nil:
+          # TYPE LEVEL: Handle importcpp pragma for types
+          let expr = if it.kind in nkPragmaCallKinds and it.len == 2: it[1] else: nil
+          if expr == nil:
+            # No argument, use default "$1"
+            processImportCpp(c, sym, "$1", it.info)
+          else:
+            if containsIdent(expr):
+              # Deferred importcpp expression with identifiers
+              sym.typ.importcExpr = expr
+              sym.typ.incl tfDeferredImportc
+              sym.incl(sfImportc)
+              sym.incl(sfInfixCall)
+              sym.excl(sfForward)
+              if c.config.backend == backendC:
+                let m = sym.getModule()
+                incl(m.flagsImpl, sfCompileToCpp)
+              incl c.config.globalOptions, optMixedMode
+            else:
+              # Can evaluate immediately
+              let evaluated = c.semConstExpr(c, expr.copyTree)
+              if evaluated.kind in {nkStrLit, nkRStrLit, nkTripleStrLit}:
+                processImportCpp(c, sym, evaluated.strVal, it.info)
+              else:
+                localError(c.config, it.info, "importcpp pragma requires a string expression")
+        else:
+          # SYMBOL LEVEL: Original behavior
+          processImportCpp(c, sym, getOptionalStr(c, it, "$1"), it.info)
       of wCppNonPod:
         incl(sym, sfCppNonPod)
       of wImportJs:
