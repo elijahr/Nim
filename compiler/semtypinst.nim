@@ -571,60 +571,6 @@ proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
   for word in toClear:
     t.clearDeferredExpr(word)
 
-proc applyDeferredFieldPragma(cl: var TReplTypeVars, s: PSym, word: TSpecialWord,
-                              val: PNode, info: TLineInfo) =
-  ## Applies an evaluated deferred pragma to a field symbol
-  case word
-  of wAlign:
-    # Extract and validate alignment (must be power of two)
-    var alignment = 0
-    if val.kind in nkIntLit..nkInt64Lit:
-      let alignVal = int(val.intVal)
-      if isPowerOfTwo(alignVal) and alignVal > 0:
-        alignment = alignVal
-      else:
-        localError(cl.c.config, info, "align must be a power of two")
-    else:
-      localError(cl.c.config, info, "align must be a compile-time constant integer")
-
-    if alignment > 0:
-      s.alignment = max(s.alignment, alignment)
-  else:
-    discard
-
-proc evaluateDeferredFieldPragmas(cl: var TReplTypeVars, s: PSym, body: PType) =
-  ## Evaluates deferred pragma expressions on field symbols after generic instantiation.
-  ## Uses a generic loop over all deferred pragmas.
-  if s.kind != skField:
-    return
-
-  if sfHasDeferredPragmas notin s.flags:
-    return
-
-  # Collect words to clear after iteration (can't modify seq while iterating)
-  var toClear: seq[TSpecialWord] = @[]
-
-  for dp in s.deferredPragmas:
-    let expr = dp.expr
-    if expr == nil: continue
-
-    # Replace generic param identifiers with concrete types
-    var hasUnresolved = false
-    let replacedExpr = replaceIdentsWithTypes(cl, expr, body, hasUnresolved)
-
-    if hasUnresolved:
-      # Still in a nested generic context - keep for next instantiation level
-      continue
-
-    # Evaluate the expression with concrete types
-    let val = cl.c.semConstExpr(cl.c, replacedExpr)
-    applyDeferredFieldPragma(cl, s, dp.word, val, expr.info)
-    toClear.add(dp.word)
-
-  # Clear evaluated pragmas after iteration
-  for word in toClear:
-    s.clearDeferredExpr(word)
-
 proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   # tyGenericInvocation[A, tyGenericInvocation[A, B]]
   # is difficult to handle:
