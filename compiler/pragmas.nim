@@ -147,6 +147,7 @@ const
   errPragmaRequiresArgument = "$1 pragma requires an argument"
   errDeferredOnlyForImported = "deferred $1 expressions only supported for imported types"
   errMustBeConstantInteger = "$1 must be a compile-time constant integer"
+  errMustBeConstantString = "$1 must be a compile-time constant string"
 
 proc deferOrEvaluate(c: PContext, sym: PSym, it: PNode,
                      word: TSpecialWord, requireImportc: bool): bool =
@@ -309,6 +310,17 @@ template expectInt(c: PContext, n: PNode, info: TLineInfo,
   else:
     localError(c.config, info, errMustBeConstantInteger % pragmaName)
   resultVal
+
+template expectString(c: PContext, n: PNode, info: TLineInfo,
+                      pragmaName: string): string =
+  ## Validates that n evaluates to a string constant.
+  ## Returns the string value or "" on error.
+  var resultStr = ""
+  if n.kind in {nkStrLit, nkRStrLit, nkTripleStrLit}:
+    resultStr = n.strVal
+  else:
+    localError(c.config, info, errMustBeConstantString % pragmaName)
+  resultStr
 
 proc getOptionalStr(c: PContext, n: PNode, defaultStr: string): string =
   if n.kind in nkPragmaCallKinds: result = expectStrLit(c, n)
@@ -1004,10 +1016,30 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
             incl(sym, sfMangleCpp)
         incl(sym.flagsImpl, sfUsed) # avoid wrong hints
       of wImportc:
-        let name = getOptionalStr(c, it, "$1")
-        cppDefine(c.config, name)
-        recordPragma(c, it, "cppdefine", name)
-        makeExternImport(c, sym, name, it.info)
+        if sym.kind == skType and sym.typ != nil:
+          # TYPE LEVEL - special handling for default "$1"
+          let defaultName = "$1"
+          let exprOrDefault = if it.kind in nkPragmaCallKinds and it.len == 2:
+                                it[1]
+                              else:
+                                newStrNode(nkStrLit, defaultName)
+
+          if containsUnresolvedIdent(c, exprOrDefault):
+            sym.typ.setDeferredExpr(wImportc, exprOrDefault)
+            sym.incl(sfImportc)
+            sym.excl(sfForward)
+          else:
+            let evaluated = c.semConstExpr(c, exprOrDefault.copyTree)
+            let name = expectString(c, evaluated, it.info, "importc")
+            if name != "":
+              cppDefine(c.config, name)
+              recordPragma(c, it, "cppdefine", name)
+              makeExternImport(c, sym, name, it.info)
+        else:
+          let name = getOptionalStr(c, it, "$1")
+          cppDefine(c.config, name)
+          recordPragma(c, it, "cppdefine", name)
+          makeExternImport(c, sym, name, it.info)
       of wImportCompilerProc:
         let name = getOptionalStr(c, it, "$1")
         cppDefine(c.config, name)
@@ -1024,7 +1056,30 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         if sym.kind == skTemplate: incl(sym, sfCallsite)
         else: invalidPragma(c, it)
       of wImportCpp:
-        processImportCpp(c, sym, getOptionalStr(c, it, "$1"), it.info)
+        if sym.kind == skType and sym.typ != nil:
+          # TYPE LEVEL - special handling for default "$1"
+          let defaultName = "$1"
+          let exprOrDefault = if it.kind in nkPragmaCallKinds and it.len == 2:
+                                it[1]
+                              else:
+                                newStrNode(nkStrLit, defaultName)
+
+          if containsUnresolvedIdent(c, exprOrDefault):
+            sym.typ.setDeferredExpr(wImportCpp, exprOrDefault)
+            sym.incl(sfImportc)
+            incl(sym.flagsImpl, sfInfixCall)
+            excl(sym.flagsImpl, sfForward)
+            if c.config.backend == backendC:
+              let m = sym.getModule()
+              incl(m.flagsImpl, sfCompileToCpp)
+            incl c.config.globalOptions, optMixedMode
+          else:
+            let evaluated = c.semConstExpr(c, exprOrDefault.copyTree)
+            let name = expectString(c, evaluated, it.info, "importcpp")
+            if name != "":
+              processImportCpp(c, sym, name, it.info)
+        else:
+          processImportCpp(c, sym, getOptionalStr(c, it, "$1"), it.info)
       of wCppNonPod:
         incl(sym, sfCppNonPod)
       of wImportJs:

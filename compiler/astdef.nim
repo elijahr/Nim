@@ -595,8 +595,8 @@ type
 
   DeferredPragmaExpr* = object
     ## A pragma expression that needs evaluation during generic instantiation.
-    ## Used for pragmas like size and align that can reference generic params.
-    word*: TSpecialWord   ## which pragma (wSize, wAlign, etc.)
+    ## Used for pragmas like size, align, importc that can reference generic params.
+    word*: TSpecialWord   ## which pragma (wSize, wAlign, wImportc, etc.)
     expr*: PNode          ## the deferred expression containing generic params
 
   TNode*{.final, acyclic.} = object # on a 32bit machine, this takes 32 bytes

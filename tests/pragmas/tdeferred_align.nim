@@ -1,5 +1,6 @@
 discard """
   targets: "c cpp"
+  output: "All deferred align pragma tests passed!"
 """
 
 # Type-level align with generic param (native types)

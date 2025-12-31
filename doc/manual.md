@@ -8439,6 +8439,26 @@ Produces:
     std::vector<int>::iterator x;
     ```
 
+For generic types, the `importcpp` pragma also accepts compile-time expressions
+that compute the C++ identifier based on type parameters:
+
+  ```Nim
+  proc cppTypeName(T: typedesc): string {.compileTime.} =
+    when T is int32: "int"
+    elif T is float32: "float"
+    else: "double"
+
+  type
+    CppWrapper[T] {.importcpp: cppTypeName(T), size: sizeof(T), completeStruct.} = object
+
+  # Each instantiation imports the corresponding C++ type
+  var i: CppWrapper[int32]    # imports "int"
+  var f: CppWrapper[float32]  # imports "float"
+  ```
+
+The expression is evaluated when the generic type is instantiated, allowing
+a single generic Nim type to wrap multiple related C++ types.
+
 
 ImportJs pragma
 ---------------
@@ -8827,6 +8847,28 @@ The string literal passed to `importc` can be a format string:
 
 In the example, the external name of `p` is set to `prefixp`. Only ``$1``
 is available and a literal dollar sign must be written as ``$$``.
+
+For generic types, the `importc` pragma accepts compile-time expressions that
+compute the C identifier based on type parameters:
+
+  ```Nim
+  proc cTypeName(T: typedesc): string {.compileTime.} =
+    when T is int8: "int8_t"
+    elif T is int16: "int16_t"
+    elif T is int32: "int32_t"
+    elif T is int64: "int64_t"
+    else: "int"
+
+  type
+    CInt[T] {.importc: cTypeName(T), size: sizeof(T), completeStruct.} = object
+
+  # Each instantiation imports the corresponding C type
+  var i8: CInt[int8]   # imports "int8_t"
+  var i32: CInt[int32] # imports "int32_t"
+  ```
+
+This allows wrapping families of related C types with a single generic Nim type.
+The expression is evaluated when the generic type is instantiated.
 
 
 Exportc pragma

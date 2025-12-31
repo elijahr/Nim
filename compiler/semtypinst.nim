@@ -9,10 +9,10 @@
 
 # This module does the instantiation of generic types.
 
-import std / [tables, math]
+import std / [tables, math, strutils]
 
 import ast, astalgo, msgs, types, magicsys, semdata, renderer, options,
-  lineinfos, modulegraphs, layeredtable, wordrecg
+  lineinfos, modulegraphs, layeredtable, wordrecg, ropes
 
 when defined(nimPreviewSlimSystem):
   import std/assertions
@@ -484,6 +484,19 @@ proc replaceIdentsWithTypes(cl: var TReplTypeVars, n: PNode, body: PType, hasUnr
     for i in 0..<n.len:
       result.add replaceIdentsWithTypes(cl, n[i], body, hasUnresolved)
 
+proc extractAlignment(config: ConfigRef, val: PNode, info: TLineInfo): int =
+  ## Extracts and validates alignment from an evaluated node.
+  ## Returns 0 on error (error already reported).
+  if val.kind in nkIntLit..nkInt64Lit:
+    let alignVal = int(val.intVal)
+    if isPowerOfTwo(alignVal) and alignVal > 0:
+      return alignVal
+    else:
+      localError(config, info, "align must be a power of two")
+  else:
+    localError(config, info, "align must be a compile-time constant integer")
+  return 0
+
 proc applyDeferredPragma(cl: var TReplTypeVars, t: PType, word: TSpecialWord,
                          val: PNode, info: TLineInfo) =
   ## Applies an evaluated deferred pragma to a type.
@@ -497,17 +510,34 @@ proc applyDeferredPragma(cl: var TReplTypeVars, t: PType, word: TSpecialWord,
     if size > 0:
       setImportedTypeSize(cl.c.config, t, size)
   of wAlign:
-    var alignment = 0
-    if val.kind in nkIntLit..nkInt64Lit:
-      let alignVal = int(val.intVal)
-      if isPowerOfTwo(alignVal) and alignVal > 0:
-        alignment = alignVal
-      else:
-        localError(cl.c.config, info, "align must be a power of two")
-    else:
-      localError(cl.c.config, info, "align must be a compile-time constant integer")
+    let alignment = extractAlignment(cl.c.config, val, info)
     if alignment > 0:
       t.align = int16(alignment)
+  of wImportc, wImportCpp:
+    var name = ""
+    if val.kind in {nkStrLit, nkRStrLit, nkTripleStrLit}:
+      name = val.strVal
+    else:
+      localError(cl.c.config, info, $word & " must be a compile-time constant string")
+    if name != "" and t.sym != nil:
+      if tfFromGeneric in t.flags:
+        let newSym = copySym(t.sym, cl.c.idgen)
+        newSym.typ = t
+        newSym.incl sfFromGeneric
+        newSym.locImpl.snippet = ""
+        t.sym = newSym
+      if '$' notin name:
+        t.sym.setSnippet(rope(name))
+      elif name == "$1":
+        t.sym.setSnippet(rope(t.sym.name.s))
+      else:
+        try:
+          t.sym.setSnippet(rope(name % t.sym.name.s))
+        except ValueError:
+          localError(cl.c.config, info,
+            "invalid extern name: '" & name & "'. (Forgot to escape '$'?)")
+      when hasFFI:
+        t.sym.cname = $t.sym.loc.snippet
   else:
     discard
 
@@ -516,15 +546,7 @@ proc applyDeferredFieldPragma(cl: var TReplTypeVars, s: PSym, word: TSpecialWord
   ## Applies an evaluated deferred pragma to a field symbol.
   case word
   of wAlign:
-    var alignment = 0
-    if val.kind in nkIntLit..nkInt64Lit:
-      let alignVal = int(val.intVal)
-      if isPowerOfTwo(alignVal) and alignVal > 0:
-        alignment = alignVal
-      else:
-        localError(cl.c.config, info, "align must be a power of two")
-    else:
-      localError(cl.c.config, info, "align must be a compile-time constant integer")
+    let alignment = extractAlignment(cl.c.config, val, info)
     if alignment > 0:
       s.alignment = max(s.alignment, alignment)
   else:

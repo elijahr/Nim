@@ -126,6 +126,19 @@ errors.
       data {.align: alignof(T).}: T
   ```
 
+- The `importc` and `importcpp` pragmas now support compile-time expressions that
+  compute the external name based on type parameters. This allows wrapping families
+  of related C/C++ types with a single generic Nim type.
+
+  ```nim
+  proc cTypeName(T: typedesc): string {.compileTime.} =
+    when T is int32: "int32_t"
+    else: "int"
+
+  type
+    CInt[T] {.importc: cTypeName(T), size: sizeof(T).} = object
+  ```
+
 ## Compiler changes
 
 - Fixed a bug where `sizeof(T)` inside a `typedesc` template called from a generic type's
