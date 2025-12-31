@@ -97,6 +97,38 @@ const
   allRoutinePragmas* = methodPragmas + iteratorPragmas + lambdaPragmas
   enumFieldPragmas* = {wDeprecated}
 
+proc containsUnresolvedIdent(c: PContext, n: PNode): bool =
+  ## Returns true if n contains any identifiers that cannot be resolved in scope.
+  ## Unresolved identifiers indicate potential generic params that haven't been
+  ## added to scope yet (pragmas are processed before generic params in typeDefLeftSidePass).
+  result = false
+  if n == nil: return
+  case n.kind
+  of nkIdent:
+    # Look up the identifier in scope
+    var ambiguous = false
+    let sym = searchInScopes(c, n.ident, ambiguous)
+    if sym == nil:
+      # Identifier not found in scope - likely a generic param
+      result = true
+    elif sym.kind == skGenericParam:
+      # Explicitly a generic param
+      result = true
+    elif sym.kind == skType and sym.typ != nil and sym.typ.kind == tyGenericParam:
+      # Type symbol representing a generic param
+      result = true
+  of nkSym:
+    # Already resolved symbol - check if it's a generic param
+    if n.sym != nil:
+      if n.sym.kind == skGenericParam:
+        result = true
+      elif n.sym.kind == skType and n.sym.typ != nil and n.sym.typ.kind == tyGenericParam:
+        result = true
+  else:
+    for child in n:
+      if containsUnresolvedIdent(c, child):
+        return true
+
 proc getPragmaVal*(procAst: PNode; name: TSpecialWord): PNode =
   result = nil
   let p = procAst[pragmasPos]
@@ -118,6 +150,57 @@ proc recordPragma(c: PContext; n: PNode; args: varargs[string]) =
 const
   errStringLiteralExpected = "string literal expected"
   errIntLiteralExpected = "integer literal expected"
+  # Deferred pragma error messages
+  errPragmaRequiresArgument = "$1 pragma requires an argument"
+  errDeferredOnlyForImported = "deferred $1 expressions only supported for imported types"
+  errMustBeConstantInteger = "$1 must be a compile-time constant integer"
+
+proc deferOrEvaluate(c: PContext, sym: PSym, it: PNode,
+                     word: TSpecialWord, requireImportc: bool): bool =
+  ## Generic helper: decides whether to defer or evaluate a pragma expression.
+  ## Returns true if expression was deferred, false if it should be evaluated immediately.
+  ## Handles nil checks, validation, and error reporting.
+  ##
+  ## Args:
+  ##   c: Semantic context
+  ##   sym: Symbol being processed (must have .typ for types, or be a field symbol)
+  ##   it: The pragma node
+  ##   word: Pragma word (wSize, wAlign, etc.)
+  ##   requireImportc: If true, deferred expressions require sfImportc flag
+  ##
+  ## Returns:
+  ##   true = expression was deferred (caller should return)
+  ##   false = expression is ready for immediate evaluation (caller continues)
+
+  # Extract expression argument
+  let expr = if it.kind in nkPragmaCallKinds and it.len == 2: it[1] else: nil
+
+  if expr == nil:
+    localError(c.config, it.info, errPragmaRequiresArgument % $word)
+    return true  # Caller should stop processing
+
+  # Check if expression contains unresolved generic parameters
+  if containsUnresolvedIdent(c, expr):
+    # Expression needs deferral
+    if requireImportc:
+      let hasImportc = if sym.kind in {skLet, skVar, skField, skForVar}:
+                         false  # Fields don't have importc
+                       else:
+                         sfImportc in sym.flags
+      if not hasImportc:
+        localError(c.config, it.info, errDeferredOnlyForImported % $word)
+        return true
+
+    # Store deferred expression
+    if sym.kind in {skLet, skVar, skField, skForVar}:
+      sym.setDeferredExpr(word, expr)
+    else:
+      sym.typ.setDeferredExpr(word, expr)
+
+    return true  # Expression deferred, caller returns
+
+  # Expression is ready for immediate evaluation
+  return false
 
 proc invalidPragma*(c: PContext; n: PNode) =
   localError(c.config, n.info, "invalid pragma: " & renderTree(n, {renderNoComments}))
@@ -231,6 +314,17 @@ proc expectIntLit(c: PContext, n: PNode): int =
     case n[1].kind
     of nkIntLit..nkInt64Lit: result = int(n[1].intVal)
     else: localError(c.config, n.info, errIntLiteralExpected)
+
+# Template for extracting integer from already-evaluated node
+template expectInt(c: PContext, n: PNode, info: TLineInfo,
+                   pragmaName: string): int =
+  ## Validates that n is an integer constant. Returns value or 0 on error.
+  var resultVal = 0
+  if n.kind in nkIntLit..nkInt64Lit:
+    resultVal = int(n.intVal)
+  else:
+    localError(c.config, info, errMustBeConstantInteger % pragmaName)
+  resultVal
 
 proc getOptionalStr(c: PContext, n: PNode, defaultStr: string): string =
   if n.kind in nkPragmaCallKinds: result = expectStrLit(c, n)
@@ -946,20 +1040,44 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         processImportObjC(c, sym, getOptionalStr(c, it, "$1"), it.info)
       of wSize:
         if sym.typ == nil: invalidPragma(c, it)
-        var size = expectIntLit(c, it)
-        if sfImportc in sym.flags:
-          # no restrictions on size for imported types
-          setImportedTypeSize(c.config, sym.typ, size)
-        else:
-          case size
-          of 1, 2, 4:
-            sym.typ.size = size
-            sym.typ.align = int16 size
-          of 8:
-            sym.typ.size = 8
-            sym.typ.align = floatInt64Align(c.config)
+        if sym.kind == skType:
+          # Use generic helper for defer-or-evaluate decision
+          if deferOrEvaluate(c, sym, it, wSize, requireImportc = true):
+            discard  # Expression was deferred or had an error
           else:
-            localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
+            # Immediate evaluation - extract and validate
+            let expr = it[1]  # We know it exists (deferOrEvaluate checked)
+            let evaluated = c.semConstExpr(c, expr.copyTree)
+            let size = expectInt(c, evaluated, it.info, "size")
+
+            if size > 0:
+              if sfImportc in sym.flags:
+                setImportedTypeSize(c.config, sym.typ, size)
+              else:
+                case size
+                of 1, 2, 4:
+                  sym.typ.size = size
+                  sym.typ.align = int16 size
+                of 8:
+                  sym.typ.size = 8
+                  sym.typ.align = floatInt64Align(c.config)
+                else:
+                  localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
+        else:
+          # Non-type symbols - original behavior
+          var size = expectIntLit(c, it)
+          if sfImportc in sym.flags:
+            setImportedTypeSize(c.config, sym.typ, size)
+          else:
+            case size
+            of 1, 2, 4:
+              sym.typ.size = size
+              sym.typ.align = int16 size
+            of 8:
+              sym.typ.size = 8
+              sym.typ.align = floatInt64Align(c.config)
+            else:
+              localError(c.config, it.info, "size may only be 1, 2, 4 or 8")
       of wAlign:
         let alignment = expectIntLit(c, it)
         if isPowerOfTwo(alignment) and alignment > 0:

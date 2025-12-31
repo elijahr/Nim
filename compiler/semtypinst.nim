@@ -12,7 +12,7 @@
 import std / tables
 
 import ast, astalgo, msgs, types, magicsys, semdata, renderer, options,
-  lineinfos, modulegraphs, layeredtable
+  lineinfos, modulegraphs, layeredtable, wordrecg
 
 when defined(nimPreviewSlimSystem):
   import std/assertions
@@ -79,6 +79,7 @@ type
     isReturnType*: bool
     owner*: PSym              # where this instantiation comes from
     recursionLimit: int
+    genericBody*: PType       # the generic body type, used for pragma evaluation
 
 proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType, isInstValue = false): PType
 proc replaceTypeVarsS(cl: var TReplTypeVars, s: PSym, t: PType): PSym
@@ -419,6 +420,120 @@ proc instCopyType*(cl: var TReplTypeVars, t: PType): PType =
       result.destructor = nil
       result.sink = nil
 
+proc replaceIdentsWithTypes(cl: var TReplTypeVars, n: PNode, body: PType, hasUnresolved: var bool): PNode =
+  ## Walks the expression and replaces identifier nodes with type symbols
+  ## based on the generic parameters in body and concrete types in typeMap.
+  ## Sets hasUnresolved to true if any generic param couldn't be resolved to a concrete type.
+  if n == nil: return nil
+
+  case n.kind
+  of nkIdent:
+    # Look for this identifier in the generic params
+    for i in FirstGenericParamAt..<body.kidsLen:
+      let param = body[i-1]
+      if param.sym != nil and param.sym.name.s == n.ident.s:
+        # Found matching generic param - get concrete type from typeMap
+        let concreteType = cl.typeMap.lookup(param)
+        if concreteType != nil:
+          # Check if it's still a generic param (nested generic context)
+          if concreteType.kind == tyGenericParam:
+            hasUnresolved = true
+            result = n
+            return
+          # For static params, create a value node; for type params, wrap in typedesc
+          if concreteType.kind == tyStatic:
+            # Static parameter - use the value directly
+            if concreteType.n != nil:
+              result = concreteType.n.copyTree
+            else:
+              result = n
+          else:
+            # Type parameter - wrap in typedesc so it matches typedesc parameters
+            let typeDescType = makeTypeDesc(cl.c, concreteType)
+            result = newNodeIT(nkType, n.info, typeDescType)
+          return
+    # Not a generic param, keep as-is
+    result = n
+  of nkSym:
+    # Check if it's a generic param symbol
+    if n.sym != nil and n.sym.typ != nil and n.sym.typ.kind == tyGenericParam:
+      let concreteType = cl.typeMap.lookup(n.sym.typ)
+      if concreteType != nil:
+        # Check if it's still a generic param (nested generic context)
+        if concreteType.kind == tyGenericParam:
+          hasUnresolved = true
+          result = n
+          return
+        # For static params, create a value node; for type params, wrap in typedesc
+        if concreteType.kind == tyStatic:
+          # Static parameter - use the value directly
+          if concreteType.n != nil:
+            result = concreteType.n.copyTree
+          else:
+            result = n
+        else:
+          # Type parameter - wrap in typedesc so it matches typedesc parameters
+          let typeDescType = makeTypeDesc(cl.c, concreteType)
+          result = newNodeIT(nkType, n.info, typeDescType)
+        return
+    result = copyNode(n)
+    result.typ = replaceTypeVarsT(cl, n.typ)
+  of nkCharLit..nkNilLit:
+    # Literals don't have children
+    result = copyNode(n)
+  else:
+    result = copyNode(n)
+    result.typ = if n.typ != nil: replaceTypeVarsT(cl, n.typ) else: nil
+    for i in 0..<n.len:
+      result.add replaceIdentsWithTypes(cl, n[i], body, hasUnresolved)
+
+proc applyDeferredPragma(cl: var TReplTypeVars, t: PType, word: TSpecialWord,
+                         val: PNode, info: TLineInfo) =
+  ## Applies an evaluated deferred pragma to a type
+  case word
+  of wSize:
+    # Extract integer value with validation
+    var size = 0
+    if val.kind in nkIntLit..nkInt64Lit:
+      size = int(val.intVal)
+    else:
+      localError(cl.c.config, info, "size must be a compile-time constant integer")
+
+    if size > 0:
+      setImportedTypeSize(cl.c.config, t, size)
+
+  else:
+    discard
+
+proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
+  ## Evaluates all deferred pragma expressions on a type after generic instantiation.
+  if tfHasDeferredPragmas notin t.flags:
+    return
+
+  # Collect words to clear after iteration (can't modify seq while iterating)
+  var toClear: seq[TSpecialWord] = @[]
+
+  for dp in t.deferredPragmas:
+    let expr = dp.expr
+    if expr == nil: continue
+
+    # Replace identifiers with concrete types
+    var hasUnresolved = false
+    let replacedExpr = replaceIdentsWithTypes(cl, expr, body, hasUnresolved)
+
+    if hasUnresolved:
+      # Still in a nested generic context - keep for next instantiation level
+      continue
+
+    # Evaluate the expression with concrete types
+    let val = cl.c.semConstExpr(cl.c, replacedExpr)
+    applyDeferredPragma(cl, t, dp.word, val, expr.info)
+    toClear.add(dp.word)
+
+  # Clear evaluated pragmas after iteration
+  for word in toClear:
+    t.clearDeferredExpr(word)
+
 proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   # tyGenericInvocation[A, tyGenericInvocation[A, B]]
   # is difficult to handle:
@@ -494,10 +609,19 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
     return
 
   let bbody = last body
+  cl.genericBody = body  # Set for deferred pragma evaluation
   var newbody = replaceTypeVarsT(cl, bbody, isInstValue = true)
   cl.skipTypedesc = oldSkipTypedesc
   newbody.flags = newbody.flags + (t.flags + body.flags - tfInstClearedFlags)
   result.flags = result.flags + newbody.flags - tfInstClearedFlags
+
+  # Copy deferred pragma expressions from generic body to instantiated body
+  if tfHasDeferredPragmas in body.flags:
+    for dp in body.deferredPragmas:
+      newbody.setDeferredExpr(dp.word, dp.expr)
+
+  # Evaluate deferred pragma expressions now that we have concrete types
+  evaluateDeferredPragmas(cl, newbody, body)
 
   setToPreviousLayer(cl.typeMap)
 

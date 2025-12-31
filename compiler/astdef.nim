@@ -127,6 +127,8 @@ type
     sfWasGenSym       # symbol was 'gensym'ed
     sfForceLift       # variable has to be lifted into closure environment
 
+    sfHasDeferredPragmas  # field has one or more deferred pragma expressions
+
     sfDirty           # template is not hygienic (old styled template) module,
                       # compiled from a dirty-buffer
     sfCustomPragma    # symbol is custom pragma template
@@ -398,6 +400,7 @@ type
     tfIsOutParam
     tfSendable
     tfImplicitStatic
+    tfHasDeferredPragmas  # type has one or more deferred pragma expressions
 
   TTypeFlags* = set[TTypeFlag]
 
@@ -590,6 +593,13 @@ type
   TNodeSeq* = seq[PNode]
   PType* = ref TType
   PSym* = ref TSym
+
+  DeferredPragmaExpr* = object
+    ## A pragma expression that needs evaluation during generic instantiation.
+    ## Used for pragmas like size, align, importc that can reference generic params.
+    word*: TSpecialWord   ## which pragma (wSize, wAlign, wImportc, etc.)
+    expr*: PNode          ## the deferred expression containing generic params
+
   TNode*{.final, acyclic.} = object # on a 32bit machine, this takes 32 bytes
     when defined(useNodeIds):
       id*: int
@@ -709,7 +719,8 @@ type
     of skLet, skVar, skField, skForVar:
       guardImpl*: PSym
       bitsizeImpl*: int
-      alignmentImpl*: int # for alignment
+      alignmentImpl*: int        # for alignment
+      deferredExprsImpl*: seq[DeferredPragmaExpr]  # deferred pragma expressions (nil = none)
     else: nil
     magicImpl*: TMagic
     typImpl*: PType
@@ -797,6 +808,7 @@ type
                               # -1 means that the size is unknown
     alignImpl*: int16             # the type's alignment requirements
     paddingAtEndImpl*: int16      #
+    deferredExprsImpl*: seq[DeferredPragmaExpr]  # deferred pragma expressions (nil = none)
     locImpl*: TLoc
     typeInstImpl*: PType          # for generic instantiations the tyGenericInst that led to this
                               # type.
