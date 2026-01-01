@@ -593,6 +593,23 @@ proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
   if tfHasDeferredPragmas notin t.flags:
     return
 
+  # Get the module where the generic type was originally defined.
+  # This ensures that template/proc lookups in pragma expressions work correctly
+  # even when the type is instantiated from a different module.
+  let originalModule = if body.owner != nil: getModule(body.owner) else: nil
+  let oldImportsLen = cl.c.imports.len
+
+  # Track whether we need to restore optImportHidden
+  var hadImportHidden = false
+  if originalModule != nil:
+    hadImportHidden = optImportHidden in originalModule.options
+
+  # Temporarily add the original module to imports for symbol lookup.
+  # Set optImportHidden so unexported symbols (like internal templates) are visible.
+  if originalModule != nil and originalModule != cl.c.module:
+    originalModule.optionsImpl.incl optImportHidden
+    cl.c.imports.add ImportedModule(m: originalModule, mode: importAll)
+
   var toClear: seq[TSpecialWord] = @[]
   for dp in t.deferredPragmas:
     let expr = dp.expr
@@ -606,6 +623,12 @@ proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
     let val = cl.c.semConstExpr(cl.c, replacedExpr)
     applyDeferredPragma(cl, t, dp.word, val, expr.info)
     toClear.add(dp.word)
+
+  # Restore original imports and optImportHidden flag
+  if originalModule != nil and originalModule != cl.c.module:
+    cl.c.imports.setLen(oldImportsLen)
+    if not hadImportHidden:
+      originalModule.optionsImpl.excl optImportHidden
 
   for word in toClear:
     t.clearDeferredExpr(word)
