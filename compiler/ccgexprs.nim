@@ -3713,6 +3713,39 @@ proc expr(p: BProc, n: PNode, d: var TLoc) =
   of nkMixinStmt, nkBindStmt, nkReplayAction: discard
   else: internalError(p.config, n.info, "expr(" & $n.kind & "); unknown node kind")
 
+proc hasImportcField(n: PNode): bool =
+  ## Returns true if any field in the record has an importc type
+  ## that cannot be aggregate-initialized (like C11 _Atomic or opaque structs).
+  ## Types marked with completeStruct pragma are considered safe to initialize.
+  case n.kind
+  of nkRecList:
+    for it in n.sons:
+      if hasImportcField(it): return true
+  of nkRecCase:
+    if hasImportcField(n[0]): return true
+    for i in 1..<n.len:
+      if hasImportcField(n[i].lastSon): return true
+  of nkSym:
+    let field = n.sym
+    let fieldType = field.typ.skipTypes(abstractInst)
+    # Check if this is an incomplete/opaque importc type:
+    # - Has importc flag AND
+    # - Does NOT have completeStruct flag AND
+    # - Either marked as incomplete OR has no visible fields
+    if fieldType.sym != nil and sfImportc in fieldType.sym.flags:
+      if tfCompleteStruct notin fieldType.flags:
+        # Opaque/incomplete importc type - cannot aggregate init
+        if tfIncompleteStruct in fieldType.flags:
+          return true
+        # Also check if it's an object with no fields (opaque)
+        if fieldType.kind == tyObject and (fieldType.n == nil or fieldType.n.len == 0):
+          return true
+    # Recursively check nested objects
+    if fieldType.kind == tyObject and fieldType.n != nil:
+      return hasImportcField(fieldType.n)
+  else: discard
+  return false
+
 proc getDefaultValue(p: BProc; typ: PType; info: TLineInfo; result: var Builder) =
   var t = skipTypes(typ, abstractRange+{tyOwned}-{tyTypeDesc})
   case t.kind
@@ -3743,9 +3776,14 @@ proc getDefaultValue(p: BProc; typ: PType; info: TLineInfo; result: var Builder)
         result.addField(closureInit, name = "ClE_0"):
           result.add(NimNil)
   of tyObject:
-    var objInit: StructInitializer
-    result.addStructInitializer(objInit, kind = siOrderedStruct):
-      getNullValueAuxT(p, t, t, t.n, nil, result, objInit, true, info)
+    # Skip full aggregate initialization for types with importc fields
+    # (like C11 _Atomic) as they cannot be aggregate-initialized in C
+    if t.n != nil and hasImportcField(t.n):
+      result.add "{0}"
+    else:
+      var objInit: StructInitializer
+      result.addStructInitializer(objInit, kind = siOrderedStruct):
+        getNullValueAuxT(p, t, t, t.n, nil, result, objInit, true, info)
   of tyTuple:
     var tupleInit: StructInitializer
     result.addStructInitializer(tupleInit, kind = siOrderedStruct):
