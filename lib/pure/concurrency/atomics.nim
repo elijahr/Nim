@@ -293,33 +293,33 @@ else:
         moAcquireRelease
         moSequentiallyConsistent
 
-    when defined(cpp):
-      type
-        # Atomic*[T] {.importcpp: "_Atomic('0)".} = object
-
-        AtomicInt8 {.importc: "std::atomic<NI8>".} = int8
-        AtomicInt16 {.importc: "std::atomic<NI16>".} = int16
-        AtomicInt32 {.importc: "std::atomic<NI32>".} = int32
-        AtomicInt64 {.importc: "std::atomic<NI64>".} = int64
-    else:
-      type
-        # Atomic*[T] {.importcpp: "_Atomic('0)".} = object
-
-        AtomicInt8 {.importc: "_Atomic NI8".} = int8
-        AtomicInt16 {.importc: "_Atomic NI16".} = int16
-        AtomicInt32 {.importc: "_Atomic NI32".} = int32
-        AtomicInt64 {.importc: "_Atomic NI64".} = int64
+    # Computes the C/C++ type name for atomic integers.
+    # - C++ backend: "std::atomic<NI8>", "std::atomic<NI16>", etc.
+    # - C backend:   "_Atomic NI8", "_Atomic NI16", etc.
+    template atomicIntTypeName*(T: typedesc[int8 | int16 | int32 | int64]): string =
+      when defined(cpp):
+        when T is int8:  "std::atomic<NI8>"
+        elif T is int16: "std::atomic<NI16>"
+        elif T is int32: "std::atomic<NI32>"
+        elif T is int64: "std::atomic<NI64>"
+      else:
+        when T is int8:  "_Atomic NI8"
+        elif T is int16: "_Atomic NI16"
+        elif T is int32: "_Atomic NI32"
+        elif T is int64: "_Atomic NI64"
 
     type
+      # Internal atomic integer type. Maps to C11 _Atomic or C++ std::atomic
+      # depending on the backend.
+      AtomicInt[T: int8 | int16 | int32 | int64] {.importc: atomicIntTypeName(T).} = T
+
       AtomicFlag* {.importc: "atomic_flag".maybeWrapStd, size: 1.} = object
+        ## An atomic boolean state.
 
       Atomic*[T] = object
+        ## An atomic object with underlying type `T`.
         when T is Trivial:
-          # Maps the size of a trivial type to it's internal atomic type
-          when sizeof(T) == 1: value: AtomicInt8
-          elif sizeof(T) == 2: value: AtomicInt16
-          elif sizeof(T) == 4: value: AtomicInt32
-          elif sizeof(T) == 8: value: AtomicInt64
+          value: AtomicInt[nonAtomicType(T)]
         else:
           nonAtomicValue: T
           guard: AtomicFlag
