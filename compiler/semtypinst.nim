@@ -559,6 +559,11 @@ proc evaluateDeferredFieldPragmas(cl: var TReplTypeVars, s: PSym, body: PType) =
   if sfHasDeferredPragmas notin s.flags:
     return
 
+  # Get the module where the generic type was originally defined
+  # This ensures that template/proc lookups in pragma expressions work correctly
+  let originalModule = if body.owner != nil: getModule(body.owner) else: nil
+  let oldImportsLen = cl.c.imports.len
+
   var toClear: seq[TSpecialWord] = @[]
   for dp in s.deferredPragmas:
     let expr = dp.expr
@@ -569,9 +574,17 @@ proc evaluateDeferredFieldPragmas(cl: var TReplTypeVars, s: PSym, body: PType) =
     if hasUnresolved:
       continue
 
+    # Temporarily add the original module to imports for symbol lookup
+    if originalModule != nil and originalModule != cl.c.module:
+      cl.c.imports.add ImportedModule(m: originalModule, mode: importAll)
+
     let val = cl.c.semConstExpr(cl.c, replacedExpr)
     applyDeferredFieldPragma(cl, s, dp.word, val, expr.info)
     toClear.add(dp.word)
+
+    # Restore original imports
+    if originalModule != nil and originalModule != cl.c.module:
+      cl.c.imports.setLen(oldImportsLen)
 
   for word in toClear:
     s.clearDeferredExpr(word)
@@ -580,6 +593,11 @@ proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
   ## Evaluates all deferred pragma expressions on a type after generic instantiation.
   if tfHasDeferredPragmas notin t.flags:
     return
+
+  # Get the module where the generic type was originally defined
+  # This ensures that template/proc lookups in pragma expressions work correctly
+  let originalModule = if body.owner != nil: getModule(body.owner) else: nil
+  let oldImportsLen = cl.c.imports.len
 
   var toClear: seq[TSpecialWord] = @[]
   for dp in t.deferredPragmas:
@@ -591,9 +609,17 @@ proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
     if hasUnresolved:
       continue
 
+    # Temporarily add the original module to imports for symbol lookup
+    if originalModule != nil and originalModule != cl.c.module:
+      cl.c.imports.add ImportedModule(m: originalModule, mode: importAll)
+
     let val = cl.c.semConstExpr(cl.c, replacedExpr)
     applyDeferredPragma(cl, t, dp.word, val, expr.info)
     toClear.add(dp.word)
+
+    # Restore original imports
+    if originalModule != nil and originalModule != cl.c.module:
+      cl.c.imports.setLen(oldImportsLen)
 
   for word in toClear:
     t.clearDeferredExpr(word)
