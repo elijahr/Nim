@@ -149,6 +149,14 @@ const
   errMustBeConstantInteger = "$1 must be a compile-time constant integer"
   errMustBeConstantString = "$1 must be a compile-time constant string"
 
+## Deferred Pragma Pattern
+## -----------------------
+## For pragmas that support generic type parameters (size, align, importc, header):
+## 1. Call containsUnresolvedIdent() on the RAW expression FIRST
+## 2. If unresolved, store via setDeferredExpr() - evaluation happens at instantiation
+## 3. If resolved, evaluate immediately with semConstExpr()
+## See evaluateDeferredPragmas() in semtypinst.nim for deferred evaluation.
+
 proc deferOrEvaluate(c: PContext, sym: PSym, it: PNode,
                      word: TSpecialWord, requireImportc: bool): bool =
   ## Generic helper: decides whether to defer or evaluate a pragma expression.
@@ -1024,13 +1032,19 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
                               else:
                                 newStrNode(nkStrLit, defaultName)
 
+          when defined(debugAtomicPragmas):
+            echo "wImportc pragma on ", sym.name.s, " hasUnresolved=", containsUnresolvedIdent(c, exprOrDefault)
           if containsUnresolvedIdent(c, exprOrDefault):
             sym.typ.setDeferredExpr(wImportc, exprOrDefault)
             sym.incl(sfImportc)
             sym.excl(sfForward)
+            when defined(debugAtomicPragmas):
+              echo "  -> deferred"
           else:
             let evaluated = c.semConstExpr(c, exprOrDefault.copyTree)
             let name = expectString(c, evaluated, it.info, "importc")
+            when defined(debugAtomicPragmas):
+              echo "  -> evaluated to: ", name
             if name != "":
               cppDefine(c.config, name)
               recordPragma(c, it, "cppdefine", name)

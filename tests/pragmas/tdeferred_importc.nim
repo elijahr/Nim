@@ -160,3 +160,14 @@ discard TypeB[int64].sizeof
 static:
   doAssert not (TypeA[int32] is TypeA[int64])
   doAssert not (TypeA[int32] is TypeB[int32])
+
+# -----------------------------------------------------------------------------
+# $1 substitution with generic types
+# -----------------------------------------------------------------------------
+
+type GenericWrapper[T] {.importc: "Wrapper_$1", completeStruct.} = object
+  value: T
+
+# Test $1 substitution - verify compilation and sizeof access
+discard GenericWrapper[int32].sizeof
+discard GenericWrapper[int64].sizeof

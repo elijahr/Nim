@@ -538,6 +538,16 @@ proc applyDeferredPragma(cl: var TReplTypeVars, t: PType, word: TSpecialWord,
             "invalid extern name: '" & name & "'. (Forgot to escape '$'?)")
       when hasFFI:
         t.sym.cname = $t.sym.loc.snippet
+      # Set the importc flag and clear forward declaration flag
+      t.sym.incl(sfImportc)
+      t.sym.excl(sfForward)
+      # For importcpp, also set infix call flag and handle backend
+      if word == wImportCpp:
+        incl(t.sym.flagsImpl, sfInfixCall)
+        if cl.c.config.backend == backendC:
+          let m = t.sym.getModule()
+          incl(m.flagsImpl, sfCompileToCpp)
+        incl cl.c.config.globalOptions, optMixedMode
   of wHeader:
     var headerName = ""
     if val.kind in {nkStrLit, nkRStrLit, nkTripleStrLit}:
@@ -590,8 +600,28 @@ proc evaluateDeferredFieldPragmas(cl: var TReplTypeVars, s: PSym, body: PType) =
 
 proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
   ## Evaluates all deferred pragma expressions on a type after generic instantiation.
+  when defined(debugAtomicPragmas):
+    if t.sym != nil:
+      echo "evaluateDeferredPragmas called for ", t.sym.name.s, " flags=", t.flags, " hasPragmas=", (tfHasDeferredPragmas in t.flags)
   if tfHasDeferredPragmas notin t.flags:
     return
+
+  # Get the module where the generic type was originally defined.
+  # This ensures that template/proc lookups in pragma expressions work correctly
+  # even when the type is instantiated from a different module.
+  let originalModule = if body.owner != nil: getModule(body.owner) else: nil
+  let oldImportsLen = cl.c.imports.len
+
+  # Track whether we need to restore optImportHidden
+  var hadImportHidden = false
+  if originalModule != nil:
+    hadImportHidden = optImportHidden in originalModule.options
+
+  # Temporarily add the original module to imports for symbol lookup.
+  # Set optImportHidden so unexported symbols (like internal templates) are visible.
+  if originalModule != nil and originalModule != cl.c.module:
+    originalModule.optionsImpl.incl optImportHidden
+    cl.c.imports.add ImportedModule(m: originalModule, mode: importAll)
 
   var toClear: seq[TSpecialWord] = @[]
   for dp in t.deferredPragmas:
@@ -604,8 +634,16 @@ proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
       continue
 
     let val = cl.c.semConstExpr(cl.c, replacedExpr)
+    when defined(debugAtomicPragmas):
+      echo "evaluateDeferredPragmas: applying ", dp.word, " to ", t.sym.name.s, " with value ", val
     applyDeferredPragma(cl, t, dp.word, val, expr.info)
     toClear.add(dp.word)
+
+  # Restore original imports and optImportHidden flag
+  if originalModule != nil and originalModule != cl.c.module:
+    cl.c.imports.setLen(oldImportsLen)
+    if not hadImportHidden:
+      originalModule.optionsImpl.excl optImportHidden
 
   for word in toClear:
     t.clearDeferredExpr(word)
@@ -613,6 +651,9 @@ proc evaluateDeferredPragmas(cl: var TReplTypeVars, t: PType, body: PType) =
 proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   # tyGenericInvocation[A, tyGenericInvocation[A, B]]
   # is difficult to handle:
+  when defined(debugAtomicPragmas):
+    if t.sym != nil:
+      echo "handleGenericInvocation called for ", t.sym.name.s
   var body = t.genericHead
   if body.kind != tyGenericBody:
     internalError(cl.c.config, cl.info, "no generic body")
@@ -703,7 +744,21 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   # This type may be a generic alias and we want to resolve it here.
   # One step is enough, because the recursive nature of
   # handleGenericInvocation will handle the alias-to-alias-to-alias case
-  if newbody.isGenericAlias: newbody = newbody.skipGenericAlias
+  # However, don't skip if the type has an importc pragma (sfImportc flag),
+  # as we need to preserve the C type name that was set by the pragma.
+  when defined(debugAtomicPragmas):
+    if newbody.isGenericAlias:
+      echo "Generic alias detected:"
+      echo "  newbody.kind=", newbody.kind
+      echo "  newbody.sym=", (if newbody.sym != nil: newbody.sym.name.s else: "nil")
+      if newbody.sym != nil:
+        echo "  newbody.sym.flags=", newbody.sym.flags
+      echo "  newbody[0].kind=", newbody[0].kind
+      if newbody[0].sym != nil:
+        echo "  newbody[0].sym=", newbody[0].sym.name.s
+        echo "  newbody[0].sym.flags=", newbody[0].sym.flags
+  if newbody.isGenericAlias and (newbody.sym == nil or sfImportc notin newbody.sym.flags):
+    newbody = newbody.skipGenericAlias
 
   rawAddSon(result, newbody)
   checkPartialConstructedType(cl.c.config, cl.info, newbody)
