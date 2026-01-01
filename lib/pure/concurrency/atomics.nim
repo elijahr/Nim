@@ -10,7 +10,7 @@
 ## Types and operations for atomic operations and lockless algorithms.
 ##
 ## Unstable API.
-## 
+##
 ## By default, C++ uses C11 atomic primitives. To use C++ `std::atomic`,
 ## `-d:nimUseCppAtomics` can be defined.
 
