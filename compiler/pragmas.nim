@@ -1180,13 +1180,38 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
           sym.flagsImpl.incl {sfExportc, sfMangleCpp}
           sym.typ.callConv = ccNoConvention
       of wHeader:
-        var lib = getLib(c, libHeader, getStrLitNode(c, it))
-        addToLib(lib, sym)
-        incl(sym, sfImportc)
-        incl(sym.locImpl.flags, lfHeader)
-        incl(sym.locImpl.flags, lfNoDecl)
-        # implies nodecl, because otherwise header would not make sense
-        if sym.locImpl.snippet == "": sym.locImpl.snippet = rope(sym.name.s)
+        if sym.kind == skType and sym.typ != nil:
+          # TYPE LEVEL - check for deferred evaluation
+          if it.kind in nkPragmaCallKinds and it.len == 2:
+            let expr = it[1]
+            if containsUnresolvedIdent(c, expr):
+              # Defer header pragma for evaluation during instantiation
+              sym.typ.setDeferredExpr(wHeader, expr)
+              sym.incl(sfImportc)
+              incl(sym.locImpl.flags, lfHeader)
+              incl(sym.locImpl.flags, lfNoDecl)
+              if sym.locImpl.snippet == "": sym.locImpl.snippet = rope(sym.name.s)
+            else:
+              # Evaluate immediately
+              let evaluated = c.semConstExpr(c, expr.copyTree)
+              let headerName = expectString(c, evaluated, it.info, "header")
+              if headerName != "":
+                var lib = getLib(c, libHeader, evaluated)
+                addToLib(lib, sym)
+                incl(sym, sfImportc)
+                incl(sym.locImpl.flags, lfHeader)
+                incl(sym.locImpl.flags, lfNoDecl)
+                if sym.locImpl.snippet == "": sym.locImpl.snippet = rope(sym.name.s)
+          else:
+            localError(c.config, it.info, errStringLiteralExpected)
+        else:
+          var lib = getLib(c, libHeader, getStrLitNode(c, it))
+          addToLib(lib, sym)
+          incl(sym, sfImportc)
+          incl(sym.locImpl.flags, lfHeader)
+          incl(sym.locImpl.flags, lfNoDecl)
+          # implies nodecl, because otherwise header would not make sense
+          if sym.locImpl.snippet == "": sym.locImpl.snippet = rope(sym.name.s)
       of wNoSideEffect:
         noVal(c, it)
         if sym != nil:

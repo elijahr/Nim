@@ -538,6 +538,18 @@ proc applyDeferredPragma(cl: var TReplTypeVars, t: PType, word: TSpecialWord,
             "invalid extern name: '" & name & "'. (Forgot to escape '$'?)")
       when hasFFI:
         t.sym.cname = $t.sym.loc.snippet
+  of wHeader:
+    var headerName = ""
+    if val.kind in {nkStrLit, nkRStrLit, nkTripleStrLit}:
+      headerName = val.strVal
+    else:
+      localError(cl.c.config, info, "header must be a compile-time constant string")
+    if headerName != "" and t.sym != nil:
+      # Create lib entry for the header and add the symbol to it
+      var lib = newLib(libHeader)
+      lib.path = val
+      addToLib(lib, t.sym)
+      cl.c.libs.add lib
   else:
     discard
 
