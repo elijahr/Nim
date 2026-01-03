@@ -381,6 +381,15 @@ template addAnonUnion(obj: var Builder; body: typed) =
   body
   obj.add("};\n")
 
+template addNamedUnion(obj: var Builder; name: string; body: typed) =
+  ## adds a named union i.e. `union { ... } name;` with fields according to `body`
+  ## Used for NIFC compatibility and to enable designated initializers for union members
+  obj.add "union{\n"
+  body
+  obj.add("} ")
+  obj.add(name)
+  obj.add(";\n")
+
 template addUnionType(obj: var Builder; body: typed) =
   ## adds a union type i.e. `union { ... }` with fields according to `body`
   obj.add "union{\n"

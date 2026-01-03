@@ -681,34 +681,43 @@ proc genCppInitializer(m: BModule, prc: BProc; typ: PType; didGenTemp: var bool)
 
 proc genRecordFieldsAux(m: BModule; n: PNode,
                         rectype: PType,
-                        check: var IntSet; result: var Builder; unionPrefix = "") =
+                        check: var IntSet; result: var Builder; unionPrefix = "";
+                        inUnion = false) =
   case n.kind
   of nkRecList:
     for i in 0..<n.len:
-      genRecordFieldsAux(m, n[i], rectype, check, result, unionPrefix)
+      genRecordFieldsAux(m, n[i], rectype, check, result, unionPrefix, inUnion)
   of nkRecCase:
     if n[0].kind != nkSym: internalError(m.config, n.info, "genRecordFieldsAux")
-    genRecordFieldsAux(m, n[0], rectype, check, result, unionPrefix)
-    # prefix mangled name with "_U" to avoid clashes with other field names,
-    # since identifiers are not allowed to start with '_'
+    genRecordFieldsAux(m, n[0], rectype, check, result, unionPrefix, inUnion)
+    # The union is named after the discriminator field with "_U" prefix.
+    # This enables designated initializers for the union and is required for NIFC.
+    let discriminatorName = mangleRecFieldName(m, n[0].sym)
+    let unionName = "_U" & discriminatorName
     var unionBody = newBuilder("")
     for i in 1..<n.len:
       case n[i].kind
       of nkOfBranch, nkElse:
         let k = lastSon(n[i])
         if k.kind != nkSym:
-          let structName = "_" & mangleRecFieldName(m, n[0].sym) & "_" & $i
+          let structName = "_" & discriminatorName & "_" & $i
           var a = newBuilder("")
-          genRecordFieldsAux(m, k, rectype, check, a, unionPrefix & $structName & ".")
+          # Include the union name in the prefix for field access paths
+          # Pass inUnion=true so fields inside don't get C++ initializers
+          genRecordFieldsAux(m, k, rectype, check, a,
+                             unionPrefix & unionName & "." & structName & ".",
+                             inUnion = true)
           if a.buf.len != 0:
             unionBody.addFieldWithStructType(m, rectype, structName):
               unionBody.add(extract(a))
         else:
-          genRecordFieldsAux(m, k, rectype, check, unionBody, unionPrefix)
+          # Single field branch (nkSym) - field is directly in the union
+          genRecordFieldsAux(m, k, rectype, check, unionBody,
+                             unionPrefix & unionName & ".",
+                             inUnion = true)
       else: internalError(m.config, "genRecordFieldsAux(record case branch)")
     if unionBody.buf.len != 0:
-      result.addAnonUnion:
-        # XXX this has to be a named field for NIFC
+      result.addNamedUnion(unionName):
         result.add(extract(unionBody))
   of nkSym:
     let field = n.sym
@@ -735,8 +744,10 @@ proc genRecordFieldsAux(m: BModule; n: PNode,
         typ = getTypeDescAux(m, field.loc.t, check, dkField)
         # don't use fieldType here because we need the
         # tyGenericInst for C++ template support
+        # Don't add C++ initializers inside unions - they make the union have
+        # non-trivial special member functions, which breaks named unions
         let noInit = sfNoInit in field.flags or (field.typ.sym != nil and sfNoInit in field.typ.sym.flags)
-        if not noInit and (fieldType.isOrHasImportedCppType() or hasCppCtor(m, field.owner.typ)):
+        if not noInit and not inUnion and (fieldType.isOrHasImportedCppType() or hasCppCtor(m, field.owner.typ)):
           var didGenTemp = false
           initializer = genCppInitializer(m, nil, fieldType, didGenTemp)
       result.addField(field, sname, typ, isFlexArray, initializer)

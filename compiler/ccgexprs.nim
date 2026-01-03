@@ -3928,13 +3928,15 @@ proc getNullValueAux(p: BProc; t: PType; obj, constOrNil: PNode,
     let b = lastSon(obj[selectedBranch])
     # designated initilization is the only way to init non first element of unions
     # branches are allowed to have no members (b.len == 0), in this case they don't need initializer
+    let discriminatorName = mangleRecFieldName(p.module, obj[0].sym)
+    let unionName = "_U" & discriminatorName
     var fieldName: string = ""
     if b.kind == nkRecList and not isEmptyCaseObjectBranch(b):
-      fieldName = "_" & mangleRecFieldName(p.module, obj[0].sym) & "_" & $selectedBranch
+      fieldName = "_" & discriminatorName & "_" & $selectedBranch
       # Check if branch contains opaque fields that need designated init
       let branchHasOpaque = containsOpaqueImportcFieldAux(t, b)
       let branchInitKind = if branchHasOpaque: siNamedStruct else: siOrderedStruct
-      result.addField(init, name = ""): # anonymous union
+      result.addField(init, name = unionName): # named union
         var branchInit: StructInitializer
         result.addStructInitializer(branchInit, kind = siNamedStruct):
           result.addField(branchInit, name = fieldName):
@@ -3943,7 +3945,7 @@ proc getNullValueAux(p: BProc; t: PType; obj, constOrNil: PNode,
               getNullValueAux(p, t, b, constOrNil, result, branchObjInit, isConst, info)
     elif b.kind == nkSym:
       fieldName = mangleRecFieldName(p.module, b.sym)
-      result.addField(init, name = ""): # anonymous union
+      result.addField(init, name = unionName): # named union
         var branchInit: StructInitializer
         result.addStructInitializer(branchInit, kind = siNamedStruct):
           result.addField(branchInit, name = fieldName):
