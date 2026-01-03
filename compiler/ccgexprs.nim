@@ -3771,6 +3771,53 @@ proc containsOpaqueImportcField(typ: PType): bool =
     discard
   return false
 
+proc hasOpaqueFieldOutsideVariants(typ: PType): bool
+
+proc hasOpaqueFieldOutsideVariantsAux(n: PNode): bool =
+  # Like containsOpaqueImportcFieldAux but skips variant branches
+  if n == nil: return false
+  case n.kind
+  of nkRecList:
+    for child in n.sons:
+      if hasOpaqueFieldOutsideVariantsAux(child):
+        return true
+  of nkRecCase:
+    # Only check discriminator, skip branches (they use their own init)
+    if hasOpaqueFieldOutsideVariantsAux(n[0]):
+      return true
+    # Don't recurse into branches - they're handled separately
+  of nkSym:
+    if hasOpaqueFieldOutsideVariants(n.sym.typ):
+      return true
+  else:
+    discard
+  return false
+
+proc hasOpaqueFieldOutsideVariants(typ: PType): bool =
+  # Check if type has opaque importc fields outside variant branches
+  # Used to decide if outer struct needs designated init
+  if typ == nil: return false
+  let t = skipTypes(typ, abstractRange+{tyOwned}-{tyTypeDesc})
+  if isOpaqueImportcType(t):
+    return true
+  case t.kind
+  of tyObject:
+    if t.baseClass != nil:
+      if hasOpaqueFieldOutsideVariants(t.baseClass):
+        return true
+    if hasOpaqueFieldOutsideVariantsAux(t.n):
+      return true
+  of tyTuple:
+    for i, a in t.ikids:
+      if hasOpaqueFieldOutsideVariants(a):
+        return true
+  of tyArray:
+    if hasOpaqueFieldOutsideVariants(t.elementType):
+      return true
+  else:
+    discard
+  return false
+
 proc getDefaultValue(p: BProc; typ: PType; info: TLineInfo; result: var Builder) =
   var t = skipTypes(typ, abstractRange+{tyOwned}-{tyTypeDesc})
   case t.kind
@@ -3801,9 +3848,10 @@ proc getDefaultValue(p: BProc; typ: PType; info: TLineInfo; result: var Builder)
         result.addField(closureInit, name = "ClE_0"):
           result.add(NimNil)
   of tyObject:
-    # Use designated initializers when opaque importc fields present
+    # Use designated initializers only when opaque importc fields are outside variants
+    # (opaque fields inside variants are handled by the branch's own init)
     var objInit: StructInitializer
-    let initKind = if containsOpaqueImportcField(t): siNamedStruct else: siOrderedStruct
+    let initKind = if hasOpaqueFieldOutsideVariants(t): siNamedStruct else: siOrderedStruct
     result.addStructInitializer(objInit, kind = initKind):
       getNullValueAuxT(p, t, t, t.n, nil, result, objInit, true, info)
   of tyTuple:
@@ -3883,12 +3931,15 @@ proc getNullValueAux(p: BProc; t: PType; obj, constOrNil: PNode,
     var fieldName: string = ""
     if b.kind == nkRecList and not isEmptyCaseObjectBranch(b):
       fieldName = "_" & mangleRecFieldName(p.module, obj[0].sym) & "_" & $selectedBranch
+      # Check if branch contains opaque fields that need designated init
+      let branchHasOpaque = containsOpaqueImportcFieldAux(t, b)
+      let branchInitKind = if branchHasOpaque: siNamedStruct else: siOrderedStruct
       result.addField(init, name = ""): # anonymous union
         var branchInit: StructInitializer
         result.addStructInitializer(branchInit, kind = siNamedStruct):
           result.addField(branchInit, name = fieldName):
             var branchObjInit: StructInitializer
-            result.addStructInitializer(branchObjInit, kind = siOrderedStruct):
+            result.addStructInitializer(branchObjInit, kind = branchInitKind):
               getNullValueAux(p, t, b, constOrNil, result, branchObjInit, isConst, info)
     elif b.kind == nkSym:
       fieldName = mangleRecFieldName(p.module, b.sym)
@@ -3954,9 +4005,9 @@ proc getNullValueAuxT(p: BProc; orig, t: PType; obj, constOrNil: PNode,
 
 proc genConstObjConstr(p: BProc; n: PNode; isConst: bool; result: var Builder) =
   let t = n.typ.skipTypes(abstractInstOwned)
-  # Use designated initializers when opaque importc fields present
+  # Use designated initializers only when opaque importc fields are outside variants
   var objInit: StructInitializer
-  let initKind = if t.kind == tyObject and containsOpaqueImportcField(t): siNamedStruct else: siOrderedStruct
+  let initKind = if t.kind == tyObject and hasOpaqueFieldOutsideVariants(t): siNamedStruct else: siOrderedStruct
   result.addStructInitializer(objInit, kind = initKind):
     if t.kind == tyObject:
       getNullValueAuxT(p, t, t, t.n, n, result, objInit, isConst, n.info)
