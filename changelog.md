@@ -124,6 +124,7 @@ errors.
 
 ## Tool changes
 
+- Added `--raw` flag when generating JSON docs to not render markup.
 - Added `--stdinfile` flag to name of the file used when running program from stdin (defaults to `stdinfile.nim`)
 
 ## Documentation changes
