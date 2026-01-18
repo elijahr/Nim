@@ -171,22 +171,22 @@ proc getTypeName(m: BModule; typ: PType; sig: SigHash): Rope =
   result = typ.loc.snippet
   if result == "": internalError(m.config, "getTypeName: " & $typ.kind)
 
-proc mapSetType(conf: ConfigRef; typ: PType): TCTypeKind =
-  case int(getSize(conf, typ))
+proc mapSetType(graph: ModuleGraph; typ: PType): TCTypeKind =
+  case int(getSize(graph, typ))
   of 1: result = ctInt8
   of 2: result = ctInt16
   of 4: result = ctInt32
   of 8: result = ctInt64
   else: result = ctArray
 
-proc mapType(conf: ConfigRef; typ: PType; isParam: bool): TCTypeKind =
+proc mapType(graph: ModuleGraph; typ: PType; isParam: bool): TCTypeKind =
   ## Maps a Nim type to a C type
   case typ.kind
   of tyNone, tyTyped: result = ctVoid
   of tyBool: result = ctBool
   of tyChar: result = ctChar
   of tyNil: result = ctPtr
-  of tySet: result = mapSetType(conf, typ)
+  of tySet: result = mapSetType(graph, typ)
   of tyOpenArray, tyVarargs:
     if isParam: result = ctArray
     else: result = ctStruct
@@ -194,27 +194,27 @@ proc mapType(conf: ConfigRef; typ: PType; isParam: bool): TCTypeKind =
   of tyObject, tyTuple: result = ctStruct
   of tyUserTypeClasses:
     doAssert typ.isResolvedUserTypeClass
-    result = mapType(conf, typ.skipModifier, isParam)
+    result = mapType(graph, typ.skipModifier, isParam)
   of tyGenericBody, tyGenericInst, tyGenericParam, tyDistinct, tyOrdinal,
      tyTypeDesc, tyAlias, tySink, tyInferred, tyOwned:
-    result = mapType(conf, skipModifier(typ), isParam)
+    result = mapType(graph, skipModifier(typ), isParam)
   of tyEnum:
-    if firstOrd(conf, typ) < 0:
+    if firstOrd(graph.config, typ) < 0:
       result = ctInt32
     else:
-      case int(getSize(conf, typ))
+      case int(getSize(graph, typ))
       of 1: result = ctUInt8
       of 2: result = ctUInt16
       of 4: result = ctInt32
       of 8: result = ctInt64
       else: result = ctInt32
-  of tyRange: result = mapType(conf, typ.elementType, isParam)
+  of tyRange: result = mapType(graph, typ.elementType, isParam)
   of tyPtr, tyVar, tyLent, tyRef:
     var base = skipTypes(typ.elementType, typedescInst)
     case base.kind
     of tyOpenArray, tyArray, tyVarargs, tyUncheckedArray: result = ctPtrToArray
     of tySet:
-      if mapSetType(conf, base) == ctArray: result = ctPtrToArray
+      if mapSetType(graph, base) == ctArray: result = ctPtrToArray
       else: result = ctPtr
     else: result = ctPtr
   of tyPointer: result = ctPtr
@@ -225,7 +225,7 @@ proc mapType(conf: ConfigRef; typ: PType; isParam: bool): TCTypeKind =
   of tyInt..tyUInt64:
     result = TCTypeKind(ord(typ.kind) - ord(tyInt) + ord(ctInt))
   of tyStatic:
-    if typ.n != nil: result = mapType(conf, typ.skipModifier, isParam)
+    if typ.n != nil: result = mapType(graph, typ.skipModifier, isParam)
     else:
       result = ctVoid
       doAssert(false, "mapType: " & $typ.kind)
@@ -234,10 +234,10 @@ proc mapType(conf: ConfigRef; typ: PType; isParam: bool): TCTypeKind =
     doAssert(false, "mapType: " & $typ.kind)
 
 
-proc mapReturnType(conf: ConfigRef; typ: PType): TCTypeKind =
+proc mapReturnType(graph: ModuleGraph; typ: PType): TCTypeKind =
   #if skipTypes(typ, typedescInst).kind == tyArray: result = ctPtr
   #else:
-  result = mapType(conf, typ, false)
+  result = mapType(graph, typ, false)
 
 proc isImportedType(t: PType): bool =
   result = t.sym != nil and sfImportc in t.sym.flags
@@ -256,7 +256,7 @@ proc hasNoInit(t: PType): bool =
 
 proc getTypeDescAux(m: BModule; origTyp: PType, check: var IntSet; kind: TypeDescKind): Rope
 
-proc isInvalidReturnType(conf: ConfigRef; typ: PType, isProc = true): bool =
+proc isInvalidReturnType(graph: ModuleGraph; typ: PType, isProc = true): bool =
   # Arrays and sets cannot be returned by a C procedure, because C is
   # such a poor programming language.
   # We exclude records with refs too. This enhances efficiency and
@@ -267,23 +267,23 @@ proc isInvalidReturnType(conf: ConfigRef; typ: PType, isProc = true): bool =
     rettype = rettype[0]
     isAllowedCall = typ.callConv in {ccClosure, ccInline, ccNimCall}
   if rettype == nil or (isAllowedCall and
-                    getSize(conf, rettype) > conf.target.floatSize*3):
+                    getSize(graph, rettype) > graph.config.target.floatSize*3):
     result = true
   else:
-    case mapType(conf, rettype, false)
+    case mapType(graph, rettype, false)
     of ctArray:
       result = not (skipTypes(rettype, typedescInst).kind in
           {tyVar, tyLent, tyRef, tyPtr})
     of ctStruct:
       let t = skipTypes(rettype, typedescInst)
       if rettype.isImportedCppType or t.isImportedCppType or
-          (typ.callConv == ccCDecl and conf.selectedGC in {gcArc, gcAtomicArc, gcOrc}):
+          (typ.callConv == ccCDecl and graph.config.selectedGC in {gcArc, gcAtomicArc, gcOrc}):
         # prevents nrvo for cdecl procs; # bug #23401
         result = false
       else:
         result = containsGarbageCollectedRef(t) or
             (t.kind == tyObject and not isObjLackingTypeField(t)) or
-            (getSize(conf, rettype) == szUnknownSize and (t.sym == nil or sfImportc notin t.sym.flags))
+            (getSize(graph, rettype) == szUnknownSize and (t.sym == nil or sfImportc notin t.sym.flags))
 
     else: result = false
 
@@ -294,7 +294,7 @@ proc cacheGetType(tab: TypeCache; sig: SigHash): Rope =
   result = tab.getOrDefault(sig)
 
 proc addAbiCheck(m: BModule; t: PType, name: Rope) =
-  if isDefined(m.config, "checkAbi") and (let size = getSize(m.config, t); size != szUnknownSize):
+  if isDefined(m.config, "checkAbi") and (let size = getSize(m.g.graph, t); size != szUnknownSize):
     var msg = "backend & Nim disagree on size for: "
     msg.addTypeHeader(m.config, t)
     var msg2 = ""
@@ -303,12 +303,12 @@ proc addAbiCheck(m: BModule; t: PType, name: Rope) =
     # see `testCodegenABICheck` for example error message it generates
 
 
-proc fillResult(conf: ConfigRef; param: PNode, proctype: PType) =
+proc fillResult(graph: ModuleGraph; param: PNode, proctype: PType) =
   ensureMutable param.sym
   fillLoc(param.sym.locImpl, locParam, param, "Result",
           OnStack)
   let t = param.sym.typ
-  if mapReturnType(conf, t) != ctArray and isInvalidReturnType(conf, proctype):
+  if mapReturnType(graph, t) != ctArray and isInvalidReturnType(graph, proctype):
     incl(param.sym.locImpl.flags, lfIndirect)
     param.sym.locImpl.storage = OnUnknown
 
@@ -519,7 +519,7 @@ proc genMemberProcParams(m: BModule; prc: PSym, superCall, rettype, name, params
   if isCtor or (name[0] == '~' and sfMember in prc.flags):
     # destructors can't have void
     rettype = ""
-  elif t.returnType == nil or isInvalidReturnType(m.config, t):
+  elif t.returnType == nil or isInvalidReturnType(m.g.graph, t):
     rettype = CVoid
   else:
     if rettype == "":
@@ -555,7 +555,7 @@ proc genMemberProcParams(m: BModule; prc: PSym, superCall, rettype, name, params
     fillParamName(m, param)
     fillLoc(param.locImpl, locParam, t.n[i],
             param.paramStorageLoc)
-    if ccgIntroducedPtr(m.config, param, t.returnType) and descKind == dkParam:
+    if ccgIntroducedPtr(m.g.graph, param, t.returnType) and descKind == dkParam:
       typ = getTypeDescWeak(m, param.typ, check, descKind) & "*"
       incl(param.locImpl.flags, lfIndirect)
       param.locImpl.storage = OnUnknown
@@ -592,7 +592,7 @@ proc genMemberProcParams(m: BModule; prc: PSym, superCall, rettype, name, params
 proc genProcParams(m: BModule; t: PType, rettype: var Rope, params: var Builder,
                    check: var IntSet, declareEnvironment=true;
                    weakDep=false;) =
-  if t.returnType == nil or isInvalidReturnType(m.config, t):
+  if t.returnType == nil or isInvalidReturnType(m.g.graph, t):
     rettype = CVoid
   else:
     rettype = getTypeDescWeak(m, t.returnType, check, dkResult)
@@ -613,7 +613,7 @@ proc genProcParams(m: BModule; t: PType, rettype: var Rope, params: var Builder,
       fillLoc(param.locImpl, locParam, t.n[i],
               param.paramStorageLoc)
       var typ: Rope
-      if ccgIntroducedPtr(m.config, param, t.returnType) and descKind == dkParam:
+      if ccgIntroducedPtr(m.g.graph, param, t.returnType) and descKind == dkParam:
         typ = ptrType(getTypeDescWeak(m, param.typ, check, descKind))
         incl(param.locImpl.flags, lfIndirect)
         param.locImpl.storage = OnUnknown
@@ -633,10 +633,10 @@ proc genProcParams(m: BModule; t: PType, rettype: var Rope, params: var Builder,
         params.addParam(paramBuilder, name = param.locImpl.snippet & "Len_" & $j, typ = NimInt)
         inc(j)
         arr = arr[0].skipTypes({tySink})
-    if t.returnType != nil and isInvalidReturnType(m.config, t):
+    if t.returnType != nil and isInvalidReturnType(m.g.graph, t):
       var arr = t.returnType
       var typ: Snippet
-      if mapReturnType(m.config, arr) != ctArray:
+      if mapReturnType(m.g.graph, arr) != ctArray:
         if isHeaderFile in m.flags:
           # still generates types for `--header`
           typ = ptrType(getTypeDescAux(m, arr, check, dkResult))
@@ -922,7 +922,7 @@ proc getTypeDescAux(m: BModule; origTyp: PType, check: var IntSet; kind: TypeDes
                     compileToCpp(m): "&" else: "*"
     var et = origTyp.skipTypes(abstractInst).elementType
     var etB = et.skipTypes(abstractInst)
-    if mapType(m.config, t, kind == dkParam) == ctPtrToArray and (etB.kind != tyOpenArray or kind == dkParam):
+    if mapType(m.g.graph, t, kind == dkParam) == ctPtrToArray and (etB.kind != tyOpenArray or kind == dkParam):
       if etB.kind == tySet:
         et = getSysType(m.g.graph, unknownLineInfo, tyUInt8)
       else:
@@ -967,7 +967,7 @@ proc getTypeDescAux(m: BModule; origTyp: PType, check: var IntSet; kind: TypeDes
             m.s[cfsTypes].add(NimInt32)
           size = 4
         else:
-          size = int(getSize(m.config, t))
+          size = int(getSize(m.g.graph, t))
           case size
           of 1:
             m.s[cfsTypes].addTypedef(name = result):
@@ -1076,7 +1076,7 @@ proc getTypeDescAux(m: BModule; origTyp: PType, check: var IntSet; kind: TypeDes
     result.add $t.elementType.hashType(m.config)
     m.typeCache[sig] = result
     if not isImportedType(t):
-      let s = int(getSize(m.config, t))
+      let s = int(getSize(m.g.graph, t))
       case s
       of 1, 2, 4, 8:
         m.s[cfsTypes].addTypedef(name = result):

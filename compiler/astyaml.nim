@@ -52,7 +52,7 @@ proc typeToYamlAux(res: var string; conf: ConfigRef; n: PType; marker: var IntSe
 proc symToYamlAux(res: var string; conf: ConfigRef; n: PSym; marker: var IntSet; indent: int; maxRecDepth: int) =
   if n == nil:
     res.add("null")
-  elif containsOrIncl(marker, n.id):
+  elif containsOrIncl(marker, n.itemId.item):
     res.addYamlString(n.name.s)
   else:
     let istr = spaces(indent * 4)
@@ -82,7 +82,7 @@ proc symToYamlAux(res: var string; conf: ConfigRef; n: PSym; marker: var IntSet;
 proc typeToYamlAux(res: var string; conf: ConfigRef; n: PType; marker: var IntSet; indent: int; maxRecDepth: int) =
   if n == nil:
     res.add("null")
-  elif containsOrIncl(marker, n.id):
+  elif containsOrIncl(marker, n.itemId.item):
     res.addf "\"$1 @$2\"" % [$n.kind, strutils.toHex(cast[uint](n), sizeof(n) * 2)]
   else:
     let istr = spaces(indent * 4)

@@ -73,33 +73,33 @@ proc finish(arg: var OffsetAccum): int32 =
     result = align(arg.offset, arg.maxAlign) - arg.offset
     arg.offset += result
 
-proc computeSizeAlign*(conf: ConfigRef; typ: PType)
+proc computeSizeAlign*(graph: ModuleGraph; typ: PType)
 
-proc computeSubObjectAlign(conf: ConfigRef; n: PNode): BiggestInt =
+proc computeSubObjectAlign(graph: ModuleGraph; n: PNode): BiggestInt =
   ## returns object alignment
   case n.kind
   of nkRecCase:
     assert(n[0].kind == nkSym)
-    result = computeSubObjectAlign(conf, n[0])
+    result = computeSubObjectAlign(graph, n[0])
     for i in 1..<n.len:
       let child = n[i]
       case child.kind
       of nkOfBranch, nkElse:
-        let align = computeSubObjectAlign(conf, child.lastSon)
+        let align = computeSubObjectAlign(graph, child.lastSon)
         if align < 0:
           return align
         result = max(result, align)
       else:
-        internalError(conf, "computeSubObjectAlign")
+        internalError(graph.config, "computeSubObjectAlign")
   of nkRecList:
     result = 1
     for i, child in n.sons:
-      let align = computeSubObjectAlign(conf, n[i])
+      let align = computeSubObjectAlign(graph, n[i])
       if align < 0:
         return align
       result = max(result, align)
   of nkSym:
-    computeSizeAlign(conf, n.sym.typ)
+    computeSizeAlign(graph, n.sym.typ)
     result = n.sym.typ.align
   else:
     result = 1
@@ -112,7 +112,7 @@ proc setOffsetsToUnknown(n: PNode) =
     for i in 0..<n.safeLen:
       setOffsetsToUnknown(n[i])
 
-proc computeObjectOffsetsFoldFunction(conf: ConfigRef; n: PNode; packed: bool; accum: var OffsetAccum) =
+proc computeObjectOffsetsFoldFunction(graph: ModuleGraph; n: PNode; packed: bool; accum: var OffsetAccum) =
   ## ``offset`` is the offset within the object, after the node has been written, no padding bytes added
   ## ``align`` maximum alignment from all sub nodes
   assert n != nil
@@ -121,7 +121,7 @@ proc computeObjectOffsetsFoldFunction(conf: ConfigRef; n: PNode; packed: bool; a
   case n.kind
   of nkRecCase:
     assert(n[0].kind == nkSym)
-    computeObjectOffsetsFoldFunction(conf, n[0], packed, accum)
+    computeObjectOffsetsFoldFunction(graph, n[0], packed, accum)
     var maxChildAlign = if accum.offset == szUnknownSize: szUnknownSize.int32 else: 1'i32
     if not packed:
       for i in 1..<n.len:
@@ -129,10 +129,10 @@ proc computeObjectOffsetsFoldFunction(conf: ConfigRef; n: PNode; packed: bool; a
         case child.kind
         of nkOfBranch, nkElse:
           # offset parameter cannot be known yet, it needs to know the alignment first
-          let align = int32(computeSubObjectAlign(conf, n[i].lastSon))
+          let align = int32(computeSubObjectAlign(graph, n[i].lastSon))
           maxChildAlign = alignmentMax(maxChildAlign, align)
         else:
-          internalError(conf, "computeObjectOffsetsFoldFunction(record case branch)")
+          internalError(graph.config, "computeObjectOffsetsFoldFunction(record case branch)")
     if maxChildAlign == szUnknownSize:
       setOffsetsToUnknown(n)
       accum.offset = szUnknownSize
@@ -143,17 +143,17 @@ proc computeObjectOffsetsFoldFunction(conf: ConfigRef; n: PNode; packed: bool; a
       let accumRoot = accum # copy, because each branch should start af the same offset
       for i in 1..<n.len:
         var branchAccum = OffsetAccum(offset: accumRoot.offset, maxAlign: 1)
-        computeObjectOffsetsFoldFunction(conf, n[i].lastSon, packed, branchAccum)
+        computeObjectOffsetsFoldFunction(graph, n[i].lastSon, packed, branchAccum)
         discard finish(branchAccum)
         accum.mergeBranch(branchAccum)
   of nkRecList:
     for i, child in n.sons:
-      computeObjectOffsetsFoldFunction(conf, child, packed, accum)
+      computeObjectOffsetsFoldFunction(graph, child, packed, accum)
   of nkSym:
     var size = szUnknownSize.int32
     var align = szUnknownSize.int32
     if n.sym.bitsize == 0: # 0 represents bitsize not set
-      computeSizeAlign(conf, n.sym.typ)
+      computeSizeAlign(graph, n.sym.typ)
       size = n.sym.typ.size.int32
       align = if packed: 1 else: n.sym.typ.align.int32
     accum.align(align)
@@ -165,25 +165,25 @@ proc computeObjectOffsetsFoldFunction(conf: ConfigRef; n: PNode; packed: bool; a
     accum.maxAlign = szUnknownSize
     accum.offset = szUnknownSize
 
-proc computeUnionObjectOffsetsFoldFunction(conf: ConfigRef; n: PNode; packed: bool; accum: var OffsetAccum) =
+proc computeUnionObjectOffsetsFoldFunction(graph: ModuleGraph; n: PNode; packed: bool; accum: var OffsetAccum) =
   ## ``accum.offset`` will the offset from the larget member of the union.
   case n.kind
   of nkRecCase:
     accum.offset = szUnknownSize
     accum.maxAlign = szUnknownSize
-    localError(conf, n.info, "Illegal use of ``case`` in union type.")
+    localError(graph.config, n.info, "Illegal use of ``case`` in union type.")
   of nkRecList:
     let accumRoot = accum # copy, because each branch should start af the same offset
     for child in n.sons:
       var branchAccum = OffsetAccum(offset: accumRoot.offset, maxAlign: 1)
-      computeUnionObjectOffsetsFoldFunction(conf, child, packed, branchAccum)
+      computeUnionObjectOffsetsFoldFunction(graph, child, packed, branchAccum)
       discard finish(branchAccum)
       accum.mergeBranch(branchAccum)
   of nkSym:
     var size = szUnknownSize.int32
     var align = szUnknownSize.int32
     if n.sym.bitsize == 0: # 0 represents bitsize not set
-      computeSizeAlign(conf, n.sym.typ)
+      computeSizeAlign(graph, n.sym.typ)
       size = n.sym.typ.size.int32
       align = if packed: 1 else: n.sym.typ.align.int32
     accum.align(align)
@@ -195,11 +195,12 @@ proc computeUnionObjectOffsetsFoldFunction(conf: ConfigRef; n: PNode; packed: bo
     accum.maxAlign = szUnknownSize
     accum.offset = szUnknownSize
 
-proc computeSizeAlign(conf: ConfigRef; typ: PType) =
+proc computeSizeAlign(graph: ModuleGraph; typ: PType) =
+  let conf = graph.config
   template setSize(typ, s) =
     typ.size = s
     typ.align = s
-    typ.paddingAtEnd = 0
+    # paddingAtEnd defaults to 0 via sparse storage in ModuleGraph
 
   ## computes and sets ``size`` and ``align`` members of ``typ``
   assert typ != nil
@@ -228,7 +229,7 @@ proc computeSizeAlign(conf: ConfigRef; typ: PType) =
   # mark computation in progress
   typ.size = szIllegalRecursion
   typ.align = szIllegalRecursion
-  typ.paddingAtEnd = 0
+  # paddingAtEnd defaults to 0 via sparse storage
 
   var tk = typ.kind
   case tk
@@ -253,7 +254,7 @@ proc computeSizeAlign(conf: ConfigRef; typ: PType) =
       # this is not the correct location to detect ``type A = ptr A``
       typ.size = szIllegalRecursion
       typ.align = szIllegalRecursion
-      typ.paddingAtEnd = szIllegalRecursion
+      graph.setPaddingAtEnd(typ, szIllegalRecursion)
       return
     typ.align = int16(conf.target.ptrSize)
     if typ.kind == tySequence and optSeqDestructors in conf.globalOptions:
@@ -262,7 +263,7 @@ proc computeSizeAlign(conf: ConfigRef; typ: PType) =
       typ.size = conf.target.ptrSize
 
   of tyArray:
-    computeSizeAlign(conf, typ.elementType)
+    computeSizeAlign(graph, typ.elementType)
     let elemSize = typ.elementType.size
     let len = lengthOrd(conf, typ.indexType)
     if elemSize < 0:
@@ -277,7 +278,7 @@ proc computeSizeAlign(conf: ConfigRef; typ: PType) =
 
   of tyUncheckedArray:
     let base = typ.last
-    computeSizeAlign(conf, base)
+    computeSizeAlign(graph, base)
     typ.size = 0
     typ.align = base.align
 
@@ -324,26 +325,26 @@ proc computeSizeAlign(conf: ConfigRef; typ: PType) =
         typ.size = align(length, 8) div 8 + 1
         typ.align = 1
   of tyRange:
-    computeSizeAlign(conf, typ.elementType)
+    computeSizeAlign(graph, typ.elementType)
     typ.size = typ.elementType.size
     typ.align = typ.elementType.align
-    typ.paddingAtEnd = typ.elementType.paddingAtEnd
+    graph.setPaddingAtEnd(typ, graph.paddingAtEnd(typ.elementType))
 
   of tyTuple:
     try:
       var accum = OffsetAccum(maxAlign: 1)
       for i, child in typ.ikids:
-        computeSizeAlign(conf, child)
+        computeSizeAlign(graph, child)
         accum.align(child.align)
         if typ.n != nil: # is named tuple (has field symbols)?
           let sym = typ.n[i].sym
           sym.offset = accum.offset
         accum.inc(int32(child.size))
-      typ.paddingAtEnd = int16(accum.finish())
+      graph.setPaddingAtEnd(typ, int16(accum.finish()))
       typ.size = if accum.offset == 0: 1 else: accum.offset
       typ.align = int16(accum.maxAlign)
     except IllegalTypeRecursionError:
-      typ.paddingAtEnd = szIllegalRecursion
+      graph.setPaddingAtEnd(typ, szIllegalRecursion)
       typ.size = szIllegalRecursion
       typ.align = szIllegalRecursion
 
@@ -355,10 +356,10 @@ proc computeSizeAlign(conf: ConfigRef; typ: PType) =
           var st = typ.baseClass
           while st.kind in skipPtrs:
             st = st.skipModifier
-          computeSizeAlign(conf, st)
+          computeSizeAlign(graph, st)
           if conf.backend == backendCpp:
             OffsetAccum(
-              offset: int32(st.size) - int32(st.paddingAtEnd),
+              offset: int32(st.size) - int32(graph.paddingAtEnd(st)),
               maxAlign: st.align
             )
           else:
@@ -380,10 +381,10 @@ proc computeSizeAlign(conf: ConfigRef; typ: PType) =
           localError(conf, info, "union type may not have an object header")
           accum = OffsetAccum(offset: szUnknownSize, maxAlign: szUnknownSize)
         else:
-          computeUnionObjectOffsetsFoldFunction(conf, typ.n, tfPacked in typ.flags, accum)
+          computeUnionObjectOffsetsFoldFunction(graph, typ.n, tfPacked in typ.flags, accum)
       elif tfPacked in typ.flags:
         accum.maxAlign = 1
-        computeObjectOffsetsFoldFunction(conf, typ.n, true, accum)
+        computeObjectOffsetsFoldFunction(graph, typ.n, true, accum)
       else:
         if typ.baseClass == nil and lacksMTypeField(typ) and typ.n.len == 1 and
             typ.n[0].kind == nkSym and
@@ -392,67 +393,67 @@ proc computeSizeAlign(conf: ConfigRef; typ: PType) =
           # with an UncheckedArray type
           assert accum.offset == 0
           accum.offset = 1
-        computeObjectOffsetsFoldFunction(conf, typ.n, false, accum)
-      let paddingAtEnd = int16(accum.finish())
+        computeObjectOffsetsFoldFunction(graph, typ.n, false, accum)
+      let paddingAtEndVal = int16(accum.finish())
       if typ.sym != nil and
          typ.sym.flags * {sfCompilerProc, sfImportc} == {sfImportc} and
          tfCompleteStruct notin typ.flags:
         typ.size = szUnknownSize
         typ.align = szUnknownSize
-        typ.paddingAtEnd = szUnknownSize
+        graph.setPaddingAtEnd(typ, szUnknownSize)
       else:
         typ.size = if accum.offset == 0: 1 else: accum.offset
         typ.align = int16(accum.maxAlign)
-        typ.paddingAtEnd = paddingAtEnd
+        graph.setPaddingAtEnd(typ, paddingAtEndVal)
     except IllegalTypeRecursionError:
       typ.size = szIllegalRecursion
       typ.align = szIllegalRecursion
-      typ.paddingAtEnd = szIllegalRecursion
+      graph.setPaddingAtEnd(typ, szIllegalRecursion)
   of tyInferred:
     if typ.hasElementType:
-      computeSizeAlign(conf, typ.last)
+      computeSizeAlign(graph, typ.last)
       typ.size = typ.last.size
       typ.align = typ.last.align
-      typ.paddingAtEnd = typ.last.paddingAtEnd
+      graph.setPaddingAtEnd(typ, graph.paddingAtEnd(typ.last))
 
   of tyGenericInst, tyDistinct, tyGenericBody, tyAlias, tySink, tyOwned:
-    computeSizeAlign(conf, typ.skipModifier)
+    computeSizeAlign(graph, typ.skipModifier)
     typ.size = typ.skipModifier.size
     typ.align = typ.skipModifier.align
-    typ.paddingAtEnd = typ.last.paddingAtEnd
+    graph.setPaddingAtEnd(typ, graph.paddingAtEnd(typ.last))
 
   of tyTypeClasses:
     if typ.isResolvedUserTypeClass:
-      computeSizeAlign(conf, typ.last)
+      computeSizeAlign(graph, typ.last)
       typ.size = typ.last.size
       typ.align = typ.last.align
-      typ.paddingAtEnd = typ.last.paddingAtEnd
+      graph.setPaddingAtEnd(typ, graph.paddingAtEnd(typ.last))
     else:
       typ.size = szUnknownSize
       typ.align = szUnknownSize
-      typ.paddingAtEnd = szUnknownSize
+      graph.setPaddingAtEnd(typ, szUnknownSize)
 
   of tyTypeDesc:
-    computeSizeAlign(conf, typ.base)
+    computeSizeAlign(graph, typ.base)
     typ.size = typ.base.size
     typ.align = typ.base.align
-    typ.paddingAtEnd = typ.base.paddingAtEnd
+    graph.setPaddingAtEnd(typ, graph.paddingAtEnd(typ.base))
 
   of tyForward:
     typ.size = szUnknownSize
     typ.align = szUnknownSize
-    typ.paddingAtEnd = szUnknownSize
+    graph.setPaddingAtEnd(typ, szUnknownSize)
 
   of tyStatic:
     if typ.n != nil:
-      computeSizeAlign(conf, typ.last)
+      computeSizeAlign(graph, typ.last)
       typ.size = typ.last.size
       typ.align = typ.last.align
-      typ.paddingAtEnd = typ.last.paddingAtEnd
+      graph.setPaddingAtEnd(typ, graph.paddingAtEnd(typ.last))
     else:
       typ.size = szUnknownSize
       typ.align = szUnknownSize
-      typ.paddingAtEnd = szUnknownSize
+      graph.setPaddingAtEnd(typ, szUnknownSize)
   of tyInt, tyUInt:
     setSize typ, conf.target.intSize.int16
   of tyBool, tyChar, tyUInt8, tyInt8:
@@ -466,13 +467,13 @@ proc computeSizeAlign(conf: ConfigRef; typ: PType) =
   else:
     typ.size = szUnknownSize
     typ.align = szUnknownSize
-    typ.paddingAtEnd = szUnknownSize
+    graph.setPaddingAtEnd(typ, szUnknownSize)
 
-template foldSizeOf*(conf: ConfigRef; n: PNode; fallback: PNode): PNode =
-  let config = conf
+template foldSizeOf*(graph: ModuleGraph; n: PNode; fallback: PNode): PNode =
+  let conf = graph.config
   let node = n
   let typ = node[1].typ
-  computeSizeAlign(config, typ)
+  computeSizeAlign(graph, typ)
   let size = typ.size
   if size >= 0:
     let res = newIntNode(nkIntLit, size)
@@ -482,11 +483,11 @@ template foldSizeOf*(conf: ConfigRef; n: PNode; fallback: PNode): PNode =
   else:
     fallback
 
-template foldAlignOf*(conf: ConfigRef; n: PNode; fallback: PNode): PNode =
-  let config = conf
+template foldAlignOf*(graph: ModuleGraph; n: PNode; fallback: PNode): PNode =
+  let conf = graph.config
   let node = n
   let typ = node[1].typ
-  computeSizeAlign(config, typ)
+  computeSizeAlign(graph, typ)
   let align = typ.align
   if align >= 0:
     let res = newIntNode(nkIntLit, align)
@@ -496,10 +497,10 @@ template foldAlignOf*(conf: ConfigRef; n: PNode; fallback: PNode): PNode =
   else:
     fallback
 
-template foldOffsetOf*(conf: ConfigRef; n: PNode; fallback: PNode): PNode =
+template foldOffsetOf*(graph: ModuleGraph; n: PNode; fallback: PNode): PNode =
   ## Returns an int literal node of the given offsetof expression in `n`.
   ## Falls back to `fallback`, if the `offsetof` expression can't be processed.
-  let config = conf
+  let conf = graph.config
   let node = n
   var dotExpr: PNode
   block findDotExpr:
@@ -509,12 +510,12 @@ template foldOffsetOf*(conf: ConfigRef; n: PNode; fallback: PNode): PNode =
       dotExpr = node[1][0]
     else:
       dotExpr = nil
-      localError(config, node.info, "can't compute offsetof on this ast")
+      localError(conf, node.info, "can't compute offsetof on this ast")
 
   assert dotExpr != nil
   let value = dotExpr[0]
   let member = dotExpr[1]
-  computeSizeAlign(config, value.typ)
+  computeSizeAlign(graph, value.typ)
   let offset = member.sym.offset
   if offset >= 0:
     let tmp = newIntNode(nkIntLit, offset)

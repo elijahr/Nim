@@ -1853,7 +1853,7 @@ proc typeSectionFinalPass(c: PContext, n: PNode) =
                     newTypeS(s.typ.kind, c))
 
         if not hasError:
-          checkConstructedType(c.config, s.info, s.typ)
+          checkConstructedType(c.graph, s.info, s.typ)
   #instAllTypeBoundOp(c, n.info)
 
 

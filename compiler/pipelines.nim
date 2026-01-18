@@ -1,7 +1,7 @@
 import sem, cgen, modulegraphs, ast, llstream, parser, msgs,
        lineinfos, reorder, options, semdata, cgendata, modules, pathutils,
        packages, syntaxes, depends, vm, pragmas, idents, lookups, wordrecg,
-       liftdestructors, nifgen
+       liftdestructors, nifgen, types
 
 when not defined(nimKochBootstrap):
   import vmdef
@@ -259,7 +259,15 @@ proc processPipelineModule*(graph: ModuleGraph; module: PSym; idgen: IdGenerator
           if m == module:
             replayActions.add n
 
-      writeNifModule(graph.config, module.position.int32, topLevelStmts, graph.opsLog, replayActions)
+      # Create callbacks for type extension side-tables
+      proc getDeferredPragmas(t: PType): seq[PNode] =
+        result = @[]
+        for dp in graph.deferredPragmas(t):
+          result.add(dp.expr)
+      proc getPaddingAtEnd(t: PType): int16 =
+        result = graph.paddingAtEnd(t)
+      writeNifModule(graph.config, module.position.int32, topLevelStmts, graph.opsLog, replayActions,
+                     getDeferredPragmas, getPaddingAtEnd)
 
   result = true
 

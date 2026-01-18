@@ -145,10 +145,10 @@ proc evalOp(m: TMagic, n, a, b, c: PNode; idgen: IdGenerator; g: ModuleGraph): P
   of mUnaryMinusI, mUnaryMinusI64: result = foldUnarySub(getInt(a), n, idgen, g)
   of mUnaryMinusF64: result = newFloatNodeT(-getFloat(a), n, g)
   of mNot: result = newIntNodeT(One - getInt(a), n, idgen, g)
-  of mCard: result = newIntNodeT(toInt128(nimsets.cardSet(g.config, a)), n, idgen, g)
+  of mCard: result = newIntNodeT(toInt128(nimsets.cardSet(g, a)), n, idgen, g)
   of mBitnotI:
     if n.typ.isUnsigned:
-      result = newIntNodeT(bitnot(getInt(a)).maskBytes(int(getSize(g.config, n.typ))), n, idgen, g)
+      result = newIntNodeT(bitnot(getInt(a)).maskBytes(int(getSize(g, n.typ))), n, idgen, g)
     else:
       result = newIntNodeT(bitnot(getInt(a)), n, idgen, g)
   of mLengthArray: result = newIntNodeT(lengthOrd(g.config, a.typ), n, idgen, g)
@@ -271,41 +271,41 @@ proc evalOp(m: TMagic, n, a, b, c: PNode; idgen: IdGenerator; g: ModuleGraph): P
   of mBitorI, mOr: result = newIntNodeT(bitor(getInt(a), getInt(b)), n, idgen, g)
   of mBitxorI, mXor: result = newIntNodeT(bitxor(getInt(a), getInt(b)), n, idgen, g)
   of mAddU:
-    let val = maskBytes(getInt(a) + getInt(b), int(getSize(g.config, n.typ)))
+    let val = maskBytes(getInt(a) + getInt(b), int(getSize(g, n.typ)))
     result = newIntNodeT(val, n, idgen, g)
   of mSubU:
-    let val = maskBytes(getInt(a) - getInt(b), int(getSize(g.config, n.typ)))
+    let val = maskBytes(getInt(a) - getInt(b), int(getSize(g, n.typ)))
     result = newIntNodeT(val, n, idgen, g)
     # echo "subU: ", val, " n: ", n, " result: ", val
   of mMulU:
-    let val = maskBytes(getInt(a) * getInt(b), int(getSize(g.config, n.typ)))
+    let val = maskBytes(getInt(a) * getInt(b), int(getSize(g, n.typ)))
     result = newIntNodeT(val, n, idgen, g)
   of mModU:
-    let argA = maskBytes(getInt(a), int(getSize(g.config, a.typ)))
-    let argB = maskBytes(getInt(b), int(getSize(g.config, a.typ)))
+    let argA = maskBytes(getInt(a), int(getSize(g, a.typ)))
+    let argB = maskBytes(getInt(b), int(getSize(g, a.typ)))
     if argB != Zero:
       result = newIntNodeT(argA mod argB, n, idgen, g)
   of mDivU:
-    let argA = maskBytes(getInt(a), int(getSize(g.config, a.typ)))
-    let argB = maskBytes(getInt(b), int(getSize(g.config, a.typ)))
+    let argA = maskBytes(getInt(a), int(getSize(g, a.typ)))
+    let argB = maskBytes(getInt(b), int(getSize(g, a.typ)))
     if argB != Zero:
       result = newIntNodeT(argA div argB, n, idgen, g)
-  of mLeSet: result = newIntNodeT(toInt128(ord(containsSets(g.config, a, b))), n, idgen, g)
-  of mEqSet: result = newIntNodeT(toInt128(ord(equalSets(g.config, a, b))), n, idgen, g)
+  of mLeSet: result = newIntNodeT(toInt128(ord(containsSets(g, a, b))), n, idgen, g)
+  of mEqSet: result = newIntNodeT(toInt128(ord(equalSets(g, a, b))), n, idgen, g)
   of mLtSet:
     result = newIntNodeT(toInt128(ord(
-      containsSets(g.config, a, b) and not equalSets(g.config, a, b))), n, idgen, g)
+      containsSets(g, a, b) and not equalSets(g, a, b))), n, idgen, g)
   of mMulSet:
-    result = nimsets.intersectSets(g.config, a, b)
+    result = nimsets.intersectSets(g, a, b)
     result.info = n.info
   of mPlusSet:
-    result = nimsets.unionSets(g.config, a, b)
+    result = nimsets.unionSets(g, a, b)
     result.info = n.info
   of mMinusSet:
-    result = nimsets.diffSets(g.config, a, b)
+    result = nimsets.diffSets(g, a, b)
     result.info = n.info
   of mXorSet:
-    result = nimsets.symdiffSets(g.config, a, b)
+    result = nimsets.symdiffSets(g, a, b)
     result.info = n.info
   of mConStrStr: result = newStrNodeT(getStrOrChar(a) & getStrOrChar(b), n, g)
   of mInSet: result = newIntNodeT(toInt128(ord(inSet(a, b))), n, idgen, g)
@@ -426,7 +426,7 @@ proc foldConv(n, a: PNode; idgen: IdGenerator; g: ModuleGraph; check = false): P
     of tyChar, tyUInt..tyUInt64, tyInt..tyInt64:
       var val = a.getOrdValue
       if dstTyp.kind in {tyUInt..tyUInt64}:
-        result = newIntNodeT(maskBytes(val, int getSize(g.config, dstTyp)), n, idgen, g)
+        result = newIntNodeT(maskBytes(val, int getSize(g, dstTyp)), n, idgen, g)
         result.transitionIntKind(nkUIntLit)
       else:
         if check: rangeCheck(n, val, g)
@@ -690,11 +690,11 @@ proc getConstExpr(m: PSym, n: PNode; idgen: IdGenerator; g: ModuleGraph): PNode 
         # This fixes bug #544.
         result = newIntNodeT(lengthOrd(g.config, n[1].typ), n, idgen, g)
       of mSizeOf:
-        result = foldSizeOf(g.config, n, nil)
+        result = foldSizeOf(g, n, nil)
       of mAlignOf:
-        result = foldAlignOf(g.config, n, nil)
+        result = foldAlignOf(g, n, nil)
       of mOffsetOf:
-        result = foldOffsetOf(g.config, n, nil)
+        result = foldOffsetOf(g, n, nil)
       of mAstToStr:
         result = newStrNodeT(renderTree(n[1], {renderNoComments}), n, g)
       of mConStrStr:
