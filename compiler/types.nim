@@ -13,7 +13,7 @@ import
   ast, astalgo, trees, msgs, platform, renderer, options,
   lineinfos, int128, modulegraphs, astmsgs, wordrecg
 
-import std/[intsets, strutils]
+import std/[intsets, strutils, tables]
 
 when defined(nimPreviewSlimSystem):
   import std/[assertions, formatfloat]
@@ -1514,6 +1514,28 @@ proc getAlign*(conf: ConfigRef; typ: PType): BiggestInt =
 proc getSize*(conf: ConfigRef; typ: PType): BiggestInt =
   computeSizeAlign(conf, typ)
   result = typ.size
+
+proc deferredPragmas*(g: ModuleGraph; t: PType): seq[DeferredPragmaExpr] =
+  ## Returns deferred pragmas for type, or empty seq if none.
+  if g.typeDeferredPragmas.hasKey(t.itemId):
+    result = g.typeDeferredPragmas[t.itemId]
+  else:
+    result = @[]
+
+proc addDeferredPragma*(g: ModuleGraph; t: PType; expr: PNode) =
+  ## Adds a deferred pragma expression to the type.
+  if not g.typeDeferredPragmas.hasKey(t.itemId):
+    g.typeDeferredPragmas[t.itemId] = @[]
+  g.typeDeferredPragmas[t.itemId].add(DeferredPragmaExpr(expr: expr))
+
+proc clearDeferredPragmas*(g: ModuleGraph; t: PType) =
+  ## Removes all deferred pragmas for type (after evaluation).
+  if g.typeDeferredPragmas.hasKey(t.itemId):
+    g.typeDeferredPragmas.del(t.itemId)
+
+proc hasDeferredPragmas*(g: ModuleGraph; t: PType): bool =
+  ## Returns true if type has pending deferred pragmas.
+  g.typeDeferredPragmas.hasKey(t.itemId)
 
 proc setImportedTypeSize*(conf: ConfigRef, t: PType, size: int) =
   t.size = size

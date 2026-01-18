@@ -14,7 +14,7 @@ from std / strutils import startsWith
 from std / os import fileExists
 import astdef, idents, msgs, options
 import lineinfos as astli
-import pathutils #, modulegraphs
+import pathutils
 import "../dist/nimony/src/lib" / [bitabs, nifstreams, nifcursors, lineinfos,
   nifindexes, nifreader]
 import "../dist/nimony/src/gear2" / modnames
@@ -148,8 +148,16 @@ let
   sdefTag = registerTag(symDefTagName)
   tdefTag = registerTag(typeDefTagName)
   hiddenTypeTag = registerTag(hiddenTypeTagName)
+  pragmasTag = registerTag("pragmas")
+  pragmaTag = registerTag("pragma")
 
 type
+  # Callback types for type extension side-table access (avoids circular import with modulegraphs)
+  # Using closures to allow capturing ModuleGraph reference
+  # Using seq[PNode] instead of seq[DeferredPragmaExpr] to avoid the dependency
+  GetDeferredPragmasCallback* = proc(t: PType): seq[PNode]
+  AddDeferredPragmaCallback* = proc(t: PType; expr: PNode)
+
   Writer = object
     deps: TokenBuf  # include&import deps
     infos: LineInfoWriter
@@ -160,6 +168,8 @@ type
     #writtenTypes: seq[PType]  # types written in this module, to be unloaded later
     #writtenSyms: seq[PSym]    # symbols written in this module, to be unloaded later
     writtenPackages: HashSet[string]
+    # Callbacks for type extension side-tables (set via writeNifModule)
+    getDeferredPragmas: GetDeferredPragmasCallback
 
 const
   # Symbol kinds that are always local to a proc and should never have module suffix
@@ -249,6 +259,28 @@ proc writeLoc(w: var Writer; dest: var TokenBuf; loc: TLoc) =
   writeFlags(dest, loc.flags)  # TLocFlags
   dest.addStrLit loc.snippet
 
+proc writeTypeExtensions(w: var Writer; dest: var TokenBuf; typ: PType) =
+  ## Serialize type extensions (deferred pragmas) as NIF pragmas for persistence.
+  ## Format: (pragmas (pragma "deferred_size" <expr>))
+  ## If no extensions, writes DotToken (empty).
+
+  # Check for deferred pragmas (via callback if set)
+  var deferredPragmas: seq[PNode] = @[]
+  if w.getDeferredPragmas != nil:
+    deferredPragmas = w.getDeferredPragmas(typ)
+
+  if deferredPragmas.len == 0:
+    dest.addDotToken()
+    return
+
+  # Build (pragmas ...) node
+  dest.buildTree pragmasTag:
+    # Write deferred pragmas
+    for expr in deferredPragmas:
+      dest.buildTree pragmaTag:
+        dest.addStrLit "deferred_size"
+        writeNode(w, dest, expr)
+
 proc writeTypeDef(w: var Writer; dest: var TokenBuf; typ: PType) =
   dest.buildTree tdefTag:
     dest.addSymDef pool.syms.getOrIncl(typeToNifSym(typ, w.infos.config)), NoLineInfo
@@ -271,6 +303,8 @@ proc writeTypeDef(w: var Writer; dest: var TokenBuf; typ: PType) =
 
     # Write TLoc structure
     writeLoc w, dest, typ.locImpl
+    # Write type extensions (deferred pragmas)
+    writeTypeExtensions w, dest, typ
     # we store the type's elements here at the end so that
     # it is not ambiguous and saves space:
     for ch in typ.sonsImpl:
@@ -704,8 +738,10 @@ proc writeOp(w: var Writer; content: var TokenBuf; op: LogEntry) =
 
 proc writeNifModule*(config: ConfigRef; thisModule: int32; n: PNode;
                      opsLog: seq[LogEntry];
-                     replayActions: seq[PNode] = @[]) =
-  var w = Writer(infos: LineInfoWriter(config: config), currentModule: thisModule)
+                     replayActions: seq[PNode] = @[];
+                     getDeferredPragmas: GetDeferredPragmasCallback = nil) =
+  var w = Writer(infos: LineInfoWriter(config: config), currentModule: thisModule,
+                 getDeferredPragmas: getDeferredPragmas)
   var content = createTokenBuf(300)
 
   let rootInfo = trLineInfo(w, n.info)
@@ -823,10 +859,19 @@ type
     syms: Table[string, (PSym, NifIndexEntry)]
     mods: Table[FileIndex, NifModule]
     cache: IdentCache
+    # Callbacks for populating type extension side-tables during loading
+    addDeferredPragma*: AddDeferredPragmaCallback
 
 proc createDecodeContext*(config: ConfigRef; cache: IdentCache): DecodeContext =
   ## Supposed to be a global variable
   result = DecodeContext(infos: LineInfoWriter(config: config), cache: cache)
+  # Callbacks are nil initially, must be set via setDecodeCallbacks after ModuleGraph is created
+
+proc setDecodeCallbacks*(c: var DecodeContext;
+                         addDeferredPragma: AddDeferredPragmaCallback) =
+  ## Sets the callbacks for populating type extension side-tables during loading.
+  ## Must be called after createDecodeContext and after ModuleGraph is created.
+  c.addDeferredPragma = addDeferredPragma
 
 proc cursorFromIndexEntry(c: var DecodeContext; module: FileIndex; entry: NifIndexEntry;
                           buf: var TokenBuf): Cursor =
@@ -1072,6 +1117,48 @@ proc loadLoc(c: var DecodeContext; n: var Cursor; loc: var TLoc) =
   loadField loc.flags
   loadField loc.snippet
 
+proc loadTypeExtensions(c: var DecodeContext; n: var Cursor; t: PType;
+                        thisModule: string; localSyms: var Table[string, PSym]) =
+  ## Load type extensions from NIF pragmas into side-tables.
+  ## Handles backwards compatibility: if no pragmas present (old format), skips gracefully.
+  ## Format: (pragmas (pragma "deferred_size" <expr>)) or DotToken
+  if n.kind == DotToken:
+    # No extensions (or old format that didn't have this slot)
+    inc n
+    return
+
+  if n.kind == ParLe and n.tagId == pragmasTag:
+    # New format with pragmas
+    inc n  # skip (pragmas
+    while n.kind != ParRi:
+      if n.kind == ParLe and n.tagId == pragmaTag:
+        inc n  # skip (pragma
+        # Read pragma name
+        if n.kind == StringLit:
+          let pragmaName = pool.strings[n.litId]
+          inc n
+          case pragmaName
+          of "deferred_size":
+            # Load the expression and add to deferred pragmas
+            let expr = loadNode(c, n, thisModule, localSyms)
+            if c.addDeferredPragma != nil and expr != nil:
+              c.addDeferredPragma(t, expr)
+          else:
+            # Unknown pragma - skip for forward compatibility
+            skip n
+        else:
+          skip n  # skip malformed pragma
+        if n.kind == ParRi:
+          inc n  # skip ) of pragma
+      else:
+        inc n  # skip unexpected content
+    if n.kind == ParRi:
+      inc n  # skip ) of pragmas
+  elif n.kind != ParRi:
+    # Old format without pragmas slot - this position is a type son, don't consume
+    # Just return, the caller will handle the sons
+    return
+
 proc loadTypeFromCursor(c: var DecodeContext; n: var Cursor; t: PType; localSyms: var Table[string, PSym]) =
   expect n, ParLe
   if n.tagId != tdefTag:
@@ -1100,6 +1187,8 @@ proc loadTypeFromCursor(c: var DecodeContext; n: var Cursor; t: PType; localSyms
   t.ownerFieldImpl = loadSymStub(c, n, typesModule, localSyms)
   t.symImpl = loadSymStub(c, n, typesModule, localSyms)
   loadLoc c, n, t.locImpl
+  # Load type extensions (deferred pragmas) from NIF pragmas
+  loadTypeExtensions c, n, t, typesModule, localSyms
 
   while n.kind != ParRi:
     t.sonsImpl.add loadTypeStub(c, n, localSyms)

@@ -54,6 +54,11 @@ type
     Docgen2JsonPass
     Docgen2Pass
 
+  DeferredPragmaExpr* = object
+    ## Stores a pragma expression whose evaluation was deferred until
+    ## type size is known (e.g., size pragma with generic parameter)
+    expr*: PNode        # The original pragma expression AST
+
   ModuleGraph* {.acyclic.} = ref object
     ifaces*: seq[Iface]  ## indexed by int32 fileIdx
 
@@ -95,6 +100,11 @@ type
     objectTree*: Table[ItemId, seq[tuple[depth: int, value: PType]]]
     methodsPerType*: Table[ItemId, seq[PSym]]
     dispatchers*: seq[PSym]
+
+    # Type extension tables (sparse metadata storage)
+    typeDeferredPragmas*: Table[ItemId, seq[DeferredPragmaExpr]]
+      ## Pragma expressions that couldn't be evaluated at declaration time.
+      ## Used for size/align pragmas with generic type parameters.
 
     systemModule*: PSym
     sysTypes*: array[TTypeKind, PType]
@@ -536,6 +546,8 @@ proc initModuleGraphFields(result: ModuleGraph) =
   result.operators = initOperators(result)
   result.emittedTypeInfo = initTable[string, FileIndex]()
   result.cachedFiles = newStringTable()
+  # Type extension tables
+  result.typeDeferredPragmas = initTable[ItemId, seq[DeferredPragmaExpr]]()
 
 proc newModuleGraph*(cache: IdentCache; config: ConfigRef): ModuleGraph =
   result = ModuleGraph()
@@ -543,6 +555,16 @@ proc newModuleGraph*(cache: IdentCache; config: ConfigRef): ModuleGraph =
   result.cache = cache
   initModuleGraphFields(result)
   ast.setupProgram(config, cache)
+  when not defined(nimKochBootstrap):
+    # Create closure-based callbacks that capture `result` (the ModuleGraph)
+    # Direct table operations to avoid circular dependency with types.nim
+    let g = result  # capture reference
+    proc addDeferredPragmaCallback(t: PType; expr: PNode) =
+      if not g.typeDeferredPragmas.hasKey(t.itemId):
+        g.typeDeferredPragmas[t.itemId] = @[]
+      g.typeDeferredPragmas[t.itemId].add(DeferredPragmaExpr(expr: expr))
+    # Set callbacks on DecodeContext for type extension side-table access during NIF loading
+    setDecodeCallbacks(ast.program, addDeferredPragmaCallback)
 
 proc resetAllModules*(g: ModuleGraph) =
   g.packageSyms = initStrTable()
