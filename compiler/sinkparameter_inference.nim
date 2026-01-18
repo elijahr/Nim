@@ -34,7 +34,7 @@ proc checkForSink*(config: ConfigRef; idgen: IdGenerator; owner: PSym; arg: PNod
         let sinkType = newType(tySink, idgen, owner)
         sinkType.size = argType.size
         sinkType.align = argType.align
-        sinkType.paddingAtEnd = argType.paddingAtEnd
+        # paddingAtEnd is computed on-demand via computeSizeAlign from typ.last
         sinkType.add argType
 
         arg.sym.typ = sinkType

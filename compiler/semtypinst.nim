@@ -23,13 +23,55 @@ proc checkPartialConstructedType(conf: ConfigRef; info: TLineInfo, t: PType) =
   if t.kind in {tyVar, tyLent} and t.elementType.kind in {tyVar, tyLent}:
     localError(conf, info, "type 'var var' is not allowed")
 
-proc checkConstructedType*(conf: ConfigRef; info: TLineInfo, typ: PType) =
+proc checkConstructedType*(g: ModuleGraph; info: TLineInfo, typ: PType) =
   var t = typ.skipTypes({tyDistinct})
   if t.kind in tyTypeClasses: discard
   elif t.kind in {tyVar, tyLent} and t.elementType.kind in {tyVar, tyLent}:
-    localError(conf, info, "type 'var var' is not allowed")
-  elif computeSize(conf, t) == szIllegalRecursion or isRecursiveStructuralType(t):
-    localError(conf, info, "illegal recursion in type '" & typeToString(t) & "'")
+    localError(g.config, info, "type 'var var' is not allowed")
+  elif computeSize(g, t) == szIllegalRecursion or isRecursiveStructuralType(t):
+    localError(g.config, info, "illegal recursion in type '" & typeToString(t) & "'")
+
+proc substituteTypeParams(n: PNode; body, inst: PType): PNode =
+  ## Substitute generic parameter references with instantiated types.
+  ## body is the generic body type, inst is the tyGenericInst.
+  if n == nil: return nil
+  case n.kind
+  of nkSym:
+    if n.sym.kind == skGenericParam or
+       (n.sym.kind == skType and n.sym.typ != nil and n.sym.typ.kind == tyGenericParam):
+      # Find which parameter this is by matching against body's params
+      for i in 0..<body.kidsLen - 1:
+        if body[i].sym == n.sym or sameTypeOrNil(body[i], n.sym.typ):
+          # inst[0] is the generic body, inst[1..] are the type arguments
+          return newNodeIT(nkType, n.info, inst[i + 1])
+      return n
+    else:
+      return n
+  of nkType:
+    if n.typ != nil and n.typ.kind == tyGenericParam:
+      for i in 0..<body.kidsLen - 1:
+        if sameTypeOrNil(body[i], n.typ):
+          return newNodeIT(nkType, n.info, inst[i + 1])
+      return n
+    else:
+      return n
+  else:
+    result = shallowCopy(n)
+    for i in 0..<n.len:
+      result[i] = substituteTypeParams(n[i], body, inst)
+
+proc evaluateDeferredPragma*(c: PContext; instType, body: PType;
+                              pragma: DeferredPragmaExpr): BiggestInt =
+  ## Evaluates a deferred pragma expression after type instantiation.
+  ## Returns the evaluated integer value, or szUnknownSize on error.
+  var expr = copyTree(pragma.expr)
+  expr = substituteTypeParams(expr, body, instType)
+  let evaluated = c.semConstExpr(c, expr)
+  if evaluated.kind in {nkCharLit..nkUInt64Lit}:
+    result = evaluated.intVal
+  else:
+    localError(c.config, pragma.expr.info, "deferred pragma must evaluate to integer constant")
+    result = szUnknownSize
 
 proc searchInstTypes*(g: ModuleGraph; key: PType): PType =
   result = nil
@@ -510,6 +552,23 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
 
   rawAddSon(result, newbody)
   checkPartialConstructedType(cl.c.config, cl.info, newbody)
+
+  # Evaluate deferred pragmas (e.g., size: sizeof(T) on generic imported types)
+  if cl.c.graph.hasDeferredPragmas(body):
+    for pragma in cl.c.graph.deferredPragmas(body):
+      let val = evaluateDeferredPragma(cl.c, result, body, pragma)
+      if val != szUnknownSize:
+        newbody.size = val
+        # Set alignment based on size for imported types
+        if val <= 1:
+          newbody.align = 1
+        elif val <= 2:
+          newbody.align = 2
+        elif val <= 4:
+          newbody.align = 4
+        else:
+          newbody.align = int16 floatInt64Align(cl.c.config)
+
   if not cl.allowMetaTypes:
     let dc = cl.c.graph.getAttachedOp(newbody, attachedDeepCopy)
     if dc != nil and sfFromGeneric notin dc.flags:

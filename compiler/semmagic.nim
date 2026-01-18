@@ -602,11 +602,11 @@ proc magicsAfterOverloadResolution(c: PContext, n: PNode,
   of mTypeOf:
     result = semTypeOf(c, n)
   of mSizeOf:
-    result = foldSizeOf(c.config, n, n)
+    result = foldSizeOf(c.graph, n, n)
   of mAlignOf:
-    result = foldAlignOf(c.config, n, n)
+    result = foldAlignOf(c.graph, n, n)
   of mOffsetOf:
-    result = foldOffsetOf(c.config, n, n)
+    result = foldOffsetOf(c.graph, n, n)
   of mArrGet:
     result = semArrGet(c, n, flags)
   of mArrPut:

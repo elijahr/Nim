@@ -342,8 +342,8 @@ proc isCastable(c: PContext; dst, src: PType, info: TLineInfo): bool =
       return false
 
   var dstSize, srcSize: BiggestInt
-  dstSize = computeSize(conf, dst)
-  srcSize = computeSize(conf, src)
+  dstSize = computeSize(c.graph, dst)
+  srcSize = computeSize(c.graph, src)
   if dstSize == -3 or srcSize == -3: # szUnknownSize
     # The Nim compiler can't detect if it's legal or not.
     # Just assume the programmer knows what he is doing.
@@ -2521,7 +2521,7 @@ proc semSizeof(c: PContext, n: PNode): PNode =
     n[1] = semExprWithType(c, n[1], {efDetermineType})
     #restoreOldStyleType(n[1])
   n.typ = getSysType(c.graph, n.info, tyInt)
-  result = foldSizeOf(c.config, n, n)
+  result = foldSizeOf(c.graph, n, n)
 
 proc semMagic(c: PContext, n: PNode, s: PSym, flags: TExprFlags; expectedType: PType = nil): PNode =
   # this is a hotspot in the compiler!

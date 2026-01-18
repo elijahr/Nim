@@ -305,7 +305,7 @@ proc setupArgsForParallelism(g: ModuleGraph; n: PNode; objType: PType;
                                     useShallowCopy=true)
       slice[3] = threadLocal.newSymNode
       call.add slice
-    elif (let size = computeSize(g.config, argType); size < 0 or size > 16) and
+    elif (let size = computeSize(g, argType); size < 0 or size > 16) and
         n.getRoot != nil:
       # it is more efficient to pass a pointer instead:
       let a = genAddrOf(n, idgen)
