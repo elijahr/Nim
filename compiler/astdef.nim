@@ -795,7 +795,7 @@ type
     sizeImpl*: BiggestInt         # the size of the type in bytes
                               # -1 means that the size is unknown
     alignImpl*: int16             # the type's alignment requirements
-    paddingAtEndImpl*: int16      #
+    # paddingAtEnd is stored in ModuleGraph.typePaddingAtEnd side-table
     locImpl*: TLoc
     typeInstImpl*: PType          # for generic instantiations the tyGenericInst that led to this
                               # type.
@@ -1052,7 +1052,7 @@ proc forcePartial*(t: PType) =
   t.symImpl = nil
   t.sizeImpl = defaultSize
   t.alignImpl = defaultAlignment
-  t.paddingAtEndImpl = 0'i16
+  # paddingAtEnd defaults to 0 in ModuleGraph.typePaddingAtEnd side-table
   t.locImpl = TLoc()
   t.typeInstImpl = nil
 

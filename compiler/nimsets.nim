@@ -10,7 +10,7 @@
 # this unit handles Nim sets; it implements symbolic sets
 
 import
-  ast, astalgo, lineinfos, bitsets, types, options
+  ast, astalgo, lineinfos, bitsets, types, options, modulegraphs
 
 when defined(nimPreviewSlimSystem):
   import std/assertions
@@ -61,12 +61,12 @@ proc someInSet*(s: PNode, a, b: PNode): bool =
         return true
   result = false
 
-proc toBitSet*(conf: ConfigRef; s: PNode): TBitSet =
+proc toBitSet*(graph: ModuleGraph; s: PNode): TBitSet =
   result = @[]
   var first: Int128 = Zero
   var j: Int128 = Zero
-  first = firstOrd(conf, s.typ.elementType)
-  bitSetInit(result, int(getSize(conf, s.typ)))
+  first = firstOrd(graph.config, s.typ.elementType)
+  bitSetInit(result, int(getSize(graph, s.typ)))
   for i in 0..<s.len:
     if s[i].kind == nkRange:
       j = getOrdValue(s[i][0], first)
@@ -76,13 +76,13 @@ proc toBitSet*(conf: ConfigRef; s: PNode): TBitSet =
     else:
       bitSetIncl(result, toInt64(getOrdValue(s[i]) - first))
 
-proc toTreeSet*(conf: ConfigRef; s: TBitSet, settype: PType, info: TLineInfo): PNode =
+proc toTreeSet*(graph: ModuleGraph; s: TBitSet, settype: PType, info: TLineInfo): PNode =
   var
     a, b, e, first: BiggestInt # a, b are interval borders
     elemType: PType
     n: PNode
   elemType = settype[0]
-  first = firstOrd(conf, elemType).toInt64
+  first = firstOrd(graph.config, elemType).toInt64
   result = newNodeI(nkCurly, info)
   result.typ = settype
   result.info = info
@@ -111,37 +111,37 @@ proc toTreeSet*(conf: ConfigRef; s: TBitSet, settype: PType, info: TLineInfo): P
     inc(e)
 
 template nodeSetOp(a, b: PNode, op: untyped) {.dirty.} =
-  var x = toBitSet(conf, a)
-  let y = toBitSet(conf, b)
+  var x = toBitSet(graph, a)
+  let y = toBitSet(graph, b)
   op(x, y)
-  result = toTreeSet(conf, x, a.typ, a.info)
+  result = toTreeSet(graph, x, a.typ, a.info)
 
-proc unionSets*(conf: ConfigRef; a, b: PNode): PNode = nodeSetOp(a, b, bitSetUnion)
-proc diffSets*(conf: ConfigRef; a, b: PNode): PNode = nodeSetOp(a, b, bitSetDiff)
-proc intersectSets*(conf: ConfigRef; a, b: PNode): PNode = nodeSetOp(a, b, bitSetIntersect)
-proc symdiffSets*(conf: ConfigRef; a, b: PNode): PNode = nodeSetOp(a, b, bitSetSymDiff)
+proc unionSets*(graph: ModuleGraph; a, b: PNode): PNode = nodeSetOp(a, b, bitSetUnion)
+proc diffSets*(graph: ModuleGraph; a, b: PNode): PNode = nodeSetOp(a, b, bitSetDiff)
+proc intersectSets*(graph: ModuleGraph; a, b: PNode): PNode = nodeSetOp(a, b, bitSetIntersect)
+proc symdiffSets*(graph: ModuleGraph; a, b: PNode): PNode = nodeSetOp(a, b, bitSetSymDiff)
 
-proc containsSets*(conf: ConfigRef; a, b: PNode): bool =
-  let x = toBitSet(conf, a)
-  let y = toBitSet(conf, b)
+proc containsSets*(graph: ModuleGraph; a, b: PNode): bool =
+  let x = toBitSet(graph, a)
+  let y = toBitSet(graph, b)
   result = bitSetContains(x, y)
 
-proc equalSets*(conf: ConfigRef; a, b: PNode): bool =
-  let x = toBitSet(conf, a)
-  let y = toBitSet(conf, b)
+proc equalSets*(graph: ModuleGraph; a, b: PNode): bool =
+  let x = toBitSet(graph, a)
+  let y = toBitSet(graph, b)
   result = bitSetEquals(x, y)
 
-proc complement*(conf: ConfigRef; a: PNode): PNode =
-  var x = toBitSet(conf, a)
+proc complement*(graph: ModuleGraph; a: PNode): PNode =
+  var x = toBitSet(graph, a)
   for i in 0..high(x): x[i] = not x[i]
-  result = toTreeSet(conf, x, a.typ, a.info)
+  result = toTreeSet(graph, x, a.typ, a.info)
 
-proc deduplicate*(conf: ConfigRef; a: PNode): PNode =
-  let x = toBitSet(conf, a)
-  result = toTreeSet(conf, x, a.typ, a.info)
+proc deduplicate*(graph: ModuleGraph; a: PNode): PNode =
+  let x = toBitSet(graph, a)
+  result = toTreeSet(graph, x, a.typ, a.info)
 
-proc cardSet*(conf: ConfigRef; a: PNode): BiggestInt =
-  let x = toBitSet(conf, a)
+proc cardSet*(graph: ModuleGraph; a: PNode): BiggestInt =
+  let x = toBitSet(graph, a)
   result = bitSetCard(x)
 
 proc setHasRange*(s: PNode): bool =

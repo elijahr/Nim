@@ -98,7 +98,7 @@ proc specializeResetT(p: BProc, accessor: Rope, typ: PType) =
   of tyCstring, tyPointer, tyPtr, tyVar, tyLent:
     p.s(cpsStmts).addAssignment(accessor, NimNil)
   of tySet:
-    case mapSetType(p.config, typ)
+    case mapSetType(p.module.g.graph, typ)
     of ctArray:
       let t = getTypeDesc(p.module, typ)
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimZeroMem"),

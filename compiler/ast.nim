@@ -378,13 +378,9 @@ proc `align=`*(t: PType, val: int16) {.inline.} =
   backendEnsureMutable t
   t.alignImpl = val
 
-proc paddingAtEnd*(t: PType): int16 {.inline.} =
-  if t.state == Partial: loadType(t)
-  result = t.paddingAtEndImpl
-
-proc `paddingAtEnd=`*(t: PType, val: int16) {.inline.} =
-  backendEnsureMutable t
-  t.paddingAtEndImpl = val
+# paddingAtEnd accessors are now in types.nim using ModuleGraph side-table:
+#   proc paddingAtEnd*(g: ModuleGraph; t: PType): int16
+#   proc `paddingAtEnd=`*(g: ModuleGraph; t: PType; val: int16)
 
 proc loc*(t: PType): TLoc {.inline.} =
   if t.state == Partial: loadType(t)

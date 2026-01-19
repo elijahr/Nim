@@ -22,6 +22,9 @@ import "../dist/nimony/src/models" / nifindex_tags
 import typekeys
 import ic / [enum2nif]
 
+# Use IndexVisibility from nifindexes (aliased as Visibility for compatibility)
+type Visibility* = IndexVisibility
+
 proc typeToNifSym(typ: PType; config: ConfigRef): string =
   result = "`t"
   result.addInt ord(typ.kind)
@@ -156,7 +159,9 @@ type
   # Using closures to allow capturing ModuleGraph reference
   # Using seq[PNode] instead of seq[DeferredPragmaExpr] to avoid the dependency
   GetDeferredPragmasCallback* = proc(t: PType): seq[PNode]
+  GetPaddingAtEndCallback* = proc(t: PType): int16
   AddDeferredPragmaCallback* = proc(t: PType; expr: PNode)
+  SetPaddingAtEndCallback* = proc(t: PType; val: int16)
 
   Writer = object
     deps: TokenBuf  # include&import deps
@@ -170,6 +175,7 @@ type
     writtenPackages: HashSet[string]
     # Callbacks for type extension side-tables (set via writeNifModule)
     getDeferredPragmas: GetDeferredPragmasCallback
+    getPaddingAtEnd: GetPaddingAtEndCallback
 
 const
   # Symbol kinds that are always local to a proc and should never have module suffix
@@ -260,8 +266,8 @@ proc writeLoc(w: var Writer; dest: var TokenBuf; loc: TLoc) =
   dest.addStrLit loc.snippet
 
 proc writeTypeExtensions(w: var Writer; dest: var TokenBuf; typ: PType) =
-  ## Serialize type extensions (deferred pragmas) as NIF pragmas for persistence.
-  ## Format: (pragmas (pragma "deferred_size" <expr>))
+  ## Serialize type extensions (deferred pragmas, padding) as NIF pragmas for persistence.
+  ## Format: (pragmas (pragma "deferred_size" <expr>) (pragma "padding_at_end" <int>))
   ## If no extensions, writes DotToken (empty).
 
   # Check for deferred pragmas (via callback if set)
@@ -269,7 +275,12 @@ proc writeTypeExtensions(w: var Writer; dest: var TokenBuf; typ: PType) =
   if w.getDeferredPragmas != nil:
     deferredPragmas = w.getDeferredPragmas(typ)
 
-  if deferredPragmas.len == 0:
+  # Check for paddingAtEnd (via callback if set)
+  var padding: int16 = 0
+  if w.getPaddingAtEnd != nil:
+    padding = w.getPaddingAtEnd(typ)
+
+  if deferredPragmas.len == 0 and padding == 0:
     dest.addDotToken()
     return
 
@@ -280,6 +291,11 @@ proc writeTypeExtensions(w: var Writer; dest: var TokenBuf; typ: PType) =
       dest.buildTree pragmaTag:
         dest.addStrLit "deferred_size"
         writeNode(w, dest, expr)
+    # Write paddingAtEnd if non-zero
+    if padding != 0:
+      dest.buildTree pragmaTag:
+        dest.addStrLit "padding_at_end"
+        dest.addIntLit padding.int64
 
 proc writeTypeDef(w: var Writer; dest: var TokenBuf; typ: PType) =
   dest.buildTree tdefTag:
@@ -291,7 +307,7 @@ proc writeTypeDef(w: var Writer; dest: var TokenBuf; typ: PType) =
     dest.addIdent toNifTag(typ.callConvImpl)
     dest.addIntLit typ.sizeImpl
     dest.addIntLit typ.alignImpl
-    dest.addIntLit typ.paddingAtEndImpl
+    dest.addIntLit 0'i16  # paddingAtEnd: computed on-demand from side-table
     dest.addIntLit typ.itemId.item  # nonUniqueId
 
     writeType(w, dest, typ.typeInstImpl)
@@ -303,7 +319,7 @@ proc writeTypeDef(w: var Writer; dest: var TokenBuf; typ: PType) =
 
     # Write TLoc structure
     writeLoc w, dest, typ.locImpl
-    # Write type extensions (deferred pragmas)
+    # Write type extensions (deferred pragmas, paddingAtEnd)
     writeTypeExtensions w, dest, typ
     # we store the type's elements here at the end so that
     # it is not ambiguous and saves space:
@@ -739,9 +755,10 @@ proc writeOp(w: var Writer; content: var TokenBuf; op: LogEntry) =
 proc writeNifModule*(config: ConfigRef; thisModule: int32; n: PNode;
                      opsLog: seq[LogEntry];
                      replayActions: seq[PNode] = @[];
-                     getDeferredPragmas: GetDeferredPragmasCallback = nil) =
+                     getDeferredPragmas: GetDeferredPragmasCallback = nil;
+                     getPaddingAtEnd: GetPaddingAtEndCallback = nil) =
   var w = Writer(infos: LineInfoWriter(config: config), currentModule: thisModule,
-                 getDeferredPragmas: getDeferredPragmas)
+                 getDeferredPragmas: getDeferredPragmas, getPaddingAtEnd: getPaddingAtEnd)
   var content = createTokenBuf(300)
 
   let rootInfo = trLineInfo(w, n.info)
@@ -861,6 +878,7 @@ type
     cache: IdentCache
     # Callbacks for populating type extension side-tables during loading
     addDeferredPragma*: AddDeferredPragmaCallback
+    setPaddingAtEnd*: SetPaddingAtEndCallback
 
 proc createDecodeContext*(config: ConfigRef; cache: IdentCache): DecodeContext =
   ## Supposed to be a global variable
@@ -868,10 +886,12 @@ proc createDecodeContext*(config: ConfigRef; cache: IdentCache): DecodeContext =
   # Callbacks are nil initially, must be set via setDecodeCallbacks after ModuleGraph is created
 
 proc setDecodeCallbacks*(c: var DecodeContext;
-                         addDeferredPragma: AddDeferredPragmaCallback) =
+                         addDeferredPragma: AddDeferredPragmaCallback;
+                         setPaddingAtEnd: SetPaddingAtEndCallback) =
   ## Sets the callbacks for populating type extension side-tables during loading.
   ## Must be called after createDecodeContext and after ModuleGraph is created.
   c.addDeferredPragma = addDeferredPragma
+  c.setPaddingAtEnd = setPaddingAtEnd
 
 proc cursorFromIndexEntry(c: var DecodeContext; module: FileIndex; entry: NifIndexEntry;
                           buf: var TokenBuf): Cursor =
@@ -1121,7 +1141,7 @@ proc loadTypeExtensions(c: var DecodeContext; n: var Cursor; t: PType;
                         thisModule: string; localSyms: var Table[string, PSym]) =
   ## Load type extensions from NIF pragmas into side-tables.
   ## Handles backwards compatibility: if no pragmas present (old format), skips gracefully.
-  ## Format: (pragmas (pragma "deferred_size" <expr>)) or DotToken
+  ## Format: (pragmas (pragma "deferred_size" <expr>) (pragma "padding_at_end" <int>)) or DotToken
   if n.kind == DotToken:
     # No extensions (or old format that didn't have this slot)
     inc n
@@ -1143,6 +1163,15 @@ proc loadTypeExtensions(c: var DecodeContext; n: var Cursor; t: PType;
             let expr = loadNode(c, n, thisModule, localSyms)
             if c.addDeferredPragma != nil and expr != nil:
               c.addDeferredPragma(t, expr)
+          of "padding_at_end":
+            # Load the int16 value and set in side-table
+            if n.kind == IntLit:
+              let padding = pool.integers[n.intId].int16
+              inc n
+              if c.setPaddingAtEnd != nil and padding != 0:
+                c.setPaddingAtEnd(t, padding)
+            else:
+              skip n  # skip unexpected value
           else:
             # Unknown pragma - skip for forward compatibility
             skip n
@@ -1179,7 +1208,8 @@ proc loadTypeFromCursor(c: var DecodeContext; n: var Cursor; t: PType; localSyms
   loadField t.callConvImpl
   loadField t.sizeImpl
   loadField t.alignImpl
-  loadField t.paddingAtEndImpl
+  var paddingAtEndDiscarded: int16 = 0
+  loadField paddingAtEndDiscarded  # paddingAtEnd: computed on-demand from side-table
   loadField t.itemId.item  # nonUniqueId
 
   t.typeInstImpl = loadTypeStub(c, n, localSyms)
@@ -1187,7 +1217,7 @@ proc loadTypeFromCursor(c: var DecodeContext; n: var Cursor; t: PType; localSyms
   t.ownerFieldImpl = loadSymStub(c, n, typesModule, localSyms)
   t.symImpl = loadSymStub(c, n, typesModule, localSyms)
   loadLoc c, n, t.locImpl
-  # Load type extensions (deferred pragmas) from NIF pragmas
+  # Load type extensions (deferred pragmas, paddingAtEnd) from NIF pragmas
   loadTypeExtensions c, n, t, typesModule, localSyms
 
   while n.kind != ParRi:

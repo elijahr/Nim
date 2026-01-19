@@ -585,12 +585,12 @@ proc geImpliesIn(x, c, aSet: PNode): TImplication =
   else:
     result = impUnknown
 
-proc compareSets(a, b: PNode): TImplication =
-  if equalSets(nil, a, b): result = impYes
-  elif intersectSets(nil, a, b).len == 0: result = impNo
+proc compareSets(graph: ModuleGraph; a, b: PNode): TImplication =
+  if equalSets(graph, a, b): result = impYes
+  elif intersectSets(graph, a, b).len == 0: result = impNo
   else: result = impUnknown
 
-proc impliesIn(fact, loc, aSet: PNode): TImplication =
+proc impliesIn(graph: ModuleGraph; fact, loc, aSet: PNode): TImplication =
   case fact[0].sym.magic
   of someEq:
     if sameTree(fact[1], loc):
@@ -603,7 +603,7 @@ proc impliesIn(fact, loc, aSet: PNode): TImplication =
       result = impUnknown
   of mInSet:
     if sameTree(fact[2], loc):
-      result = compareSets(fact[1], aSet)
+      result = compareSets(graph, fact[1], aSet)
     else:
       result = impUnknown
   of someLe:
@@ -797,7 +797,7 @@ proc `~`(x: TImplication): TImplication =
   of impNo: impYes
   of impYes: impNo
 
-proc factImplies(fact, prop: PNode): TImplication =
+proc factImplies(graph: ModuleGraph; fact, prop: PNode): TImplication =
   case fact.getMagic
   of mNot:
     # Consider:
@@ -814,29 +814,29 @@ proc factImplies(fact, prop: PNode): TImplication =
     let arg = fact[1]
     case arg.getMagic
     of mIsNil, mEqRef:
-      return ~factImplies(arg, prop)
+      return ~factImplies(graph, arg, prop)
     of mAnd:
       # not (a and b)  means  not a or not b:
       # a or b --> both need to imply 'prop'
-      let a = factImplies(arg[1], prop)
-      let b = factImplies(arg[2], prop)
+      let a = factImplies(graph, arg[1], prop)
+      let b = factImplies(graph, arg[2], prop)
       if a == b: return ~a
       return impUnknown
     else:
       return impUnknown
   of mAnd:
-    result = factImplies(fact[1], prop)
+    result = factImplies(graph, fact[1], prop)
     if result != impUnknown: return result
-    return factImplies(fact[2], prop)
+    return factImplies(graph, fact[2], prop)
   else: discard
 
   case prop[0].sym.magic
-  of mNot: result = ~fact.factImplies(prop[1])
+  of mNot: result = ~factImplies(graph, fact, prop[1])
   of mIsNil: result = impliesIsNil(fact, prop)
   of someEq: result = impliesEq(fact, prop)
   of someLe: result = impliesLe(fact, prop[1], prop[2])
   of someLt: result = impliesLt(fact, prop[1], prop[2])
-  of mInSet: result = impliesIn(fact, prop[2], prop[1])
+  of mInSet: result = impliesIn(graph, fact, prop[2], prop[1])
   else: result = impUnknown
 
 proc doesImply*(facts: TModel, prop: PNode): TImplication =
@@ -845,7 +845,7 @@ proc doesImply*(facts: TModel, prop: PNode): TImplication =
   for f in facts.s:
     # facts can be invalidated, in which case they are 'nil':
     if not f.isNil:
-      result = f.factImplies(prop)
+      result = factImplies(facts.g, f, prop)
       if result != impUnknown: return
 
 proc impliesNotNil*(m: TModel, arg: PNode): TImplication =

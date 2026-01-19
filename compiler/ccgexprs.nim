@@ -107,8 +107,8 @@ proc genRawSetData(cs: TBitSet, size: int; result: var Builder) =
     result.addIntLiteral(cast[BiggestInt](bitSetToWord(cs, size)))
 
 proc genSetNode(p: BProc, n: PNode; result: var Builder) =
-  var size = int(getSize(p.config, n.typ))
-  let cs = toBitSet(p.config, n)
+  var size = int(getSize(p.module.g.graph, n.typ))
+  let cs = toBitSet(p.module.g.graph, n)
   if size > 8:
     let id = nodeTableTestOrSet(p.module.dataCache, n, p.module.labels)
     let tmpName = p.module.tmpBase & rope(id)
@@ -179,7 +179,7 @@ proc genRefAssign(p: BProc, dest, src: TLoc) =
     let fnName =
       if dest.storage == OnHeap: cgsymValue(p.module, "asgnRef")
       else: cgsymValue(p.module, "unsureAsgnRef")
-    let rad = addrLoc(p.config, dest)
+    let rad = addrLoc(p.module.g.graph, dest)
     let rs = rdLoc(src)
     p.s(cpsStmts).addCallStmt(fnName, cCast(ptrType(CPointer), rad), rs)
 
@@ -252,23 +252,23 @@ proc genGenericAsgn(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
   elif needToCopy notin flags or
       tfShallow in skipTypes(dest.t, abstractVarRange).flags:
     if (dest.storage == OnStack and p.config.selectedGC != gcGo) or not usesWriteBarrier(p.config):
-      let rad = addrLoc(p.config, dest)
-      let ras = addrLoc(p.config, src)
+      let rad = addrLoc(p.module.g.graph, dest)
+      let ras = addrLoc(p.module.g.graph, src)
       let rd = rdLoc(dest)
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimCopyMem"),
         cCast(CPointer, rad),
         cCast(CConstPointer, ras),
         cSizeof(rd))
     else:
-      let rad = addrLoc(p.config, dest)
-      let ras = addrLoc(p.config, src)
+      let rad = addrLoc(p.module.g.graph, dest)
+      let ras = addrLoc(p.module.g.graph, src)
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericShallowAssign"),
         cCast(CPointer, rad),
         cCast(CPointer, ras),
         genTypeInfoV1(p.module, dest.t, dest.lode.info))
   else:
-    let rad = addrLoc(p.config, dest)
-    let ras = addrLoc(p.config, src)
+    let rad = addrLoc(p.module.g.graph, dest)
+    let ras = addrLoc(p.module.g.graph, src)
     p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericAssign"),
       cCast(CPointer, rad),
       cCast(CPointer, ras),
@@ -348,7 +348,7 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
     elif (needToCopy notin flags and src.storage != OnStatic) or canMove(p, src.lode, dest):
       genRefAssign(p, dest, src)
     else:
-      let rad = addrLoc(p.config, dest)
+      let rad = addrLoc(p.module.g.graph, dest)
       let rs = rdLoc(src)
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericSeqAssign"),
         rad,
@@ -377,7 +377,7 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
         p.s(cpsStmts).addSingleIfStmt(rtmp):
           p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimGCunrefNoCycle"), rtmp)
       else:
-        let rad = addrLoc(p.config, dest)
+        let rad = addrLoc(p.module.g.graph, dest)
         let rs = rdLoc(src)
         p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "unsureAsgnRef"),
           cCast(ptrType(CPointer), rad),
@@ -431,8 +431,8 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
     if reifiedOpenArray(dest.lode):
       genOpenArrayConv(p, dest, src, flags)
     elif containsGarbageCollectedRef(dest.t):
-      let rad = addrLoc(p.config, dest)
-      let ras = addrLoc(p.config, src)
+      let rad = addrLoc(p.module.g.graph, dest)
+      let ras = addrLoc(p.module.g.graph, src)
       # XXX: is this correct for arrays?
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericAssignOpenArray"),
         cCast(CPointer, rad),
@@ -445,13 +445,13 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
            # bug #4799, keep the nimCopyMem for a while
            #"#nimCopyMem((void*)$1, (NIM_CONST void*)$2, sizeof($1[0])*$1Len_0);\n")
   of tySet:
-    if mapSetType(p.config, ty) == ctArray:
+    if mapSetType(p.module.g.graph, ty) == ctArray:
       let rd = rdLoc(dest)
       let rs = rdLoc(src)
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimCopyMem"),
         cCast(CPointer, rd),
         cCast(CConstPointer, rs),
-        cIntValue(getSize(p.config, dest.t)))
+        cIntValue(getSize(p.module.g.graph, dest.t)))
     else:
       simpleAsgn(p.s(cpsStmts), dest, src)
   of tyPtr, tyPointer, tyChar, tyBool, tyEnum, tyCstring,
@@ -462,10 +462,10 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
   if optMemTracker in p.options and dest.storage in {OnHeap, OnUnknown}:
     #writeStackTrace()
     #echo p.currLineInfo, " requesting"
-    let rad = addrLoc(p.config, dest)
+    let rad = addrLoc(p.module.g.graph, dest)
     p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "memTrackerWrite"),
       cCast(CPointer, rad),
-      cIntValue(getSize(p.config, dest.t)),
+      cIntValue(getSize(p.module.g.graph, dest.t)),
       makeCString(toFullPath(p.config, p.currLineInfo)),
       cIntValue(p.currLineInfo.safeLineNm))
 
@@ -474,15 +474,15 @@ proc genDeepCopy(p: BProc; dest, src: TLoc) =
     if a.k == locExpr:
       var tmp: TLoc = getTemp(p, a.t)
       genAssignment(p, tmp, a, {})
-      addrLoc(p.config, tmp)
+      addrLoc(p.module.g.graph, tmp)
     else:
-      addrLoc(p.config, a)
+      addrLoc(p.module.g.graph, a)
 
   var ty = skipTypes(dest.t, abstractVarRange + {tyStatic})
   case ty.kind
   of tyPtr, tyRef, tyProc, tyTuple, tyObject, tyArray:
     # XXX optimize this
-    let rad = addrLoc(p.config, dest)
+    let rad = addrLoc(p.module.g.graph, dest)
     let rats = addrLocOrTemp(src)
     p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericDeepCopy"),
       cCast(CPointer, rad),
@@ -490,14 +490,14 @@ proc genDeepCopy(p: BProc; dest, src: TLoc) =
       genTypeInfoV1(p.module, dest.t, dest.lode.info))
   of tySequence, tyString:
     if optTinyRtti in p.config.globalOptions:
-      let rad = addrLoc(p.config, dest)
+      let rad = addrLoc(p.module.g.graph, dest)
       let rats = addrLocOrTemp(src)
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericDeepCopy"),
         cCast(CPointer, rad),
         cCast(CPointer, rats),
         genTypeInfoV1(p.module, dest.t, dest.lode.info))
     else:
-      let rad = addrLoc(p.config, dest)
+      let rad = addrLoc(p.module.g.graph, dest)
       let rs = rdLoc(src)
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericSeqDeepCopy"),
         rad,
@@ -505,20 +505,20 @@ proc genDeepCopy(p: BProc; dest, src: TLoc) =
         genTypeInfoV1(p.module, dest.t, dest.lode.info))
   of tyOpenArray, tyVarargs:
     let source = addrLocOrTemp(src)
-    let rad = addrLoc(p.config, dest)
+    let rad = addrLoc(p.module.g.graph, dest)
     p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericDeepCopyOpenArray"),
       cCast(CPointer, rad),
       cCast(CPointer, source),
       derefField(source, "Field1"),
       genTypeInfoV1(p.module, dest.t, dest.lode.info))
   of tySet:
-    if mapSetType(p.config, ty) == ctArray:
+    if mapSetType(p.module.g.graph, ty) == ctArray:
       let rd = rdLoc(dest)
       let rs = rdLoc(src)
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimCopyMem"),
         cCast(CPointer, rd),
         cCast(CConstPointer, rs),
-        cIntValue(getSize(p.config, dest.t)))
+        cIntValue(getSize(p.module.g.graph, dest.t)))
     else:
       simpleAsgn(p.s(cpsStmts), dest, src)
   of tyPointer, tyChar, tyBool, tyEnum, tyCstring,
@@ -611,7 +611,7 @@ template unaryExprChar(p: BProc, e: PNode, d: var TLoc, frmt: untyped) =
 
 template binaryArithOverflowRaw(p: BProc, t: PType, a, b: TLoc;
                             cpname: string): Rope =
-  var size = getSize(p.config, t)
+  var size = getSize(p.module.g.graph, t)
   let storage = if size < p.config.target.intSize: NimInt
                 else: getTypeDesc(p.module, t)
   var result = getTempName(p.module)
@@ -703,7 +703,7 @@ proc unaryArithOverflow(p: BProc, e: PNode, d: var TLoc, m: TMagic) =
 
   case m
   of mUnaryMinusI:
-    let typ = cIntType(getSize(p.config, t) * 8)
+    let typ = cIntType(getSize(p.module.g.graph, t) * 8)
     putIntoDest(p, d, e, cCast(typ, cOp(Neg, typ, ra)))
   of mUnaryMinusI64:
     putIntoDest(p, d, e, cOp(Neg, getTypeDesc(p.module, t), ra))
@@ -723,8 +723,8 @@ proc binaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   var a = initLocExpr(p, e[1])
   var b = initLocExpr(p, e[2])
   # BUGFIX: cannot use result-type here, as it may be a boolean
-  s = max(getSize(p.config, a.t), getSize(p.config, b.t)) * 8
-  k = getSize(p.config, a.t) * 8
+  s = max(getSize(p.module.g.graph, a.t), getSize(p.module.g.graph, b.t)) * 8
+  k = getSize(p.module.g.graph, a.t) * 8
 
   var res = ""
   template getType(): untyped =
@@ -881,7 +881,7 @@ proc unaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   of mUnaryPlusI:
     res = ra
   of mBitnotI:
-    let at = cUintType(getSize(p.config, t) * 8)
+    let at = cUintType(getSize(p.module.g.graph, t) * 8)
     let t = getSimpleTypeDesc(p.module, e.typ)
     res = cCast(t, cCast(at, cOp(BitNot, t, ra)))
   of mUnaryPlusF64:
@@ -898,7 +898,7 @@ proc isCppRef(p: BProc; typ: PType): bool {.inline.} =
       tfVarIsPtr notin skipTypes(typ, abstractInstOwned).flags
 
 proc genDeref(p: BProc, e: PNode, d: var TLoc) =
-  let mt = mapType(p.config, e[0].typ, mapTypeChooser(e[0]) == skParam)
+  let mt = mapType(p.module.g.graph, e[0].typ, mapTypeChooser(e[0]) == skParam)
   if mt in {ctArray, ctPtrToArray} and lfEnforceDeref notin d.flags:
     # XXX the amount of hacks for C's arrays is incredible, maybe we should
     # simply wrap them in a struct? --> Losing auto vectorization then?
@@ -977,7 +977,7 @@ proc genAddr(p: BProc, e: PNode, d: var TLoc) =
     var a: TLoc = initLocExpr(p, e[0])
     putIntoDest(p, d, e, cAddr(a.snippet), a.storage)
     #Message(e.info, warnUser, "HERE NEW &")
-  elif mapType(p.config, e[0].typ, mapTypeChooser(e[0]) == skParam) == ctArray or isCppRef(p, e.typ):
+  elif mapType(p.module.g.graph, e[0].typ, mapTypeChooser(e[0]) == skParam) == ctArray or isCppRef(p, e.typ):
     expr(p, e[0], d)
     # bug #19497
     d.lode = e
@@ -988,10 +988,10 @@ proc genAddr(p: BProc, e: PNode, d: var TLoc) =
       # transform addr ( conv ( x ) ) -> conv ( addr ( x ) )
       var exprLoc: TLoc = initLocExpr(p, e[0][1])
       var tmp = getTemp(p, e.typ, needsInit=false)
-      putIntoDest(p, tmp, e, cCast(getTypeDesc(p.module, e.typ), addrLoc(p.config, exprLoc)))
+      putIntoDest(p, tmp, e, cCast(getTypeDesc(p.module, e.typ), addrLoc(p.module.g.graph, exprLoc)))
       putIntoDest(p, d, e, rdLoc(tmp))
     else:
-      putIntoDest(p, d, e, addrLoc(p.config, a), a.storage)
+      putIntoDest(p, d, e, addrLoc(p.module.g.graph, a), a.storage)
 
 template inheritLocation(d: var TLoc, a: TLoc) =
   if d.k == locNone: d.storage = a.storage
@@ -1641,7 +1641,7 @@ proc rawGenNew(p: BProc, a: var TLoc, sizeExpr: Rope; needsInit: bool) =
           cgCall(p, "newObj",
             ti,
             sizeExpr))
-        let raa = addrLoc(p.config, a)
+        let raa = addrLoc(p.module.g.graph, a)
         let rb = b.rdLoc
         p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "unsureAsgnRef"),
           cCast(ptrType(CPointer), raa),
@@ -1694,7 +1694,7 @@ proc genNewSeqAux(p: BProc, dest: TLoc, length: Rope; lenIsZero: bool) =
         # we need the write barrier
         call.snippet = cCast(st,
           cgCall(p, "newSeq", typinfo, length))
-        let rad = addrLoc(p.config, dest)
+        let rad = addrLoc(p.module.g.graph, dest)
         let rc = call.rdLoc
         p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "unsureAsgnRef"),
           cCast(ptrType(CPointer), rad),
@@ -2067,7 +2067,7 @@ proc genRepr(p: BProc, e: PNode, d: var TLoc) =
     let ra = rdLoc(a)
     putIntoDest(p, d, e, cgCall("reprStr", ra), a.storage)
   of tySet:
-    let raa = addrLoc(p.config, a)
+    let raa = addrLoc(p.module.g.graph, a)
     let rti = genTypeInfoV1(p.module, t, e.info)
     putIntoDest(p, d, e, cgCall("reprSet", raa, rti), a.storage)
   of tyOpenArray, tyVarargs:
@@ -2098,7 +2098,7 @@ proc genRepr(p: BProc, e: PNode, d: var TLoc) =
   of tyEmpty, tyVoid:
     localError(p.config, e.info, "'repr' doesn't support 'void' type")
   else:
-    let raa = addrLoc(p.config, a)
+    let raa = addrLoc(p.module.g.graph, a)
     let rti = genTypeInfoV1(p.module, t, e.info)
     putIntoDest(p, d, e, cgCall("reprAny", raa, rti), a.storage)
   gcUsage(p.config, e)
@@ -2288,11 +2288,11 @@ proc rdSetElemLoc(conf: ConfigRef; a: TLoc, typ: PType; result: var Snippet) =
   if firstOrd(conf, setType) != 0:
     result = cOp(Sub, NimUint, result, cIntValue(firstOrd(conf, setType)))
 
-proc fewCmps(conf: ConfigRef; s: PNode): bool =
+proc fewCmps(graph: ModuleGraph; s: PNode): bool =
   # this function estimates whether it is better to emit code
   # for constructing the set or generating a bunch of comparisons directly
   if s.kind != nkCurly: return false
-  if (getSize(conf, s.typ) <= conf.target.intSize) and (nfAllConst in s.flags):
+  if (getSize(graph, s.typ) <= graph.config.target.intSize) and (nfAllConst in s.flags):
     result = false            # it is better to emit the set generation code
   elif elemType(s.typ).kind in {tyInt, tyInt16..tyInt64}:
     result = true             # better not emit the set if int is basetype!
@@ -2306,7 +2306,7 @@ template binaryExprIn(p: BProc, e: PNode, a, b, d: var TLoc, frmt: untyped) =
   putIntoDest(p, d, e, frmt)
 
 proc genInExprAux(p: BProc, e: PNode, a, b, d: var TLoc) =
-  let s = int(getSize(p.config, skipTypes(e[1].typ, abstractVar)))
+  let s = int(getSize(p.module.g.graph, skipTypes(e[1].typ, abstractVar)))
   case s
   of 1, 2, 4, 8:
     let mask = s * 8 - 1
@@ -2345,7 +2345,7 @@ template binaryStmtInExcl(p: BProc, e: PNode, d: var TLoc, frmt: untyped) =
 
 proc genInOp(p: BProc, e: PNode, d: var TLoc) =
   var a, b, x, y: TLoc
-  if (e[1].kind == nkCurly) and fewCmps(p.config, e[1]):
+  if (e[1].kind == nkCurly) and fewCmps(p.module.g.graph, e[1]):
     # a set constructor but not a constant set:
     # do not emit the set, but generate a bunch of comparisons; and if we do
     # so, we skip the unnecessary range check: This is a semantical extension
@@ -2395,7 +2395,7 @@ proc genSetOp(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   var a, b: TLoc
   var i: TLoc
   var setType = skipTypes(e[1].typ, abstractVar)
-  var size = int(getSize(p.config, setType))
+  var size = int(getSize(p.module.g.graph, setType))
   case size
   of 1, 2, 4, 8:
     let bits = size * 8
@@ -2520,7 +2520,7 @@ proc genSomeCast(p: BProc, e: PNode, d: var TLoc) =
   let srcTyp = skipTypes(e[1].typ, abstractRange)
   if etyp.kind in ValueTypes and lfIndirect notin a.flags:
     let destTyp = getTypeDesc(p.module, e.typ)
-    let val = addrLoc(p.config, a)
+    let val = addrLoc(p.module.g.graph, a)
     # (* (destType*) val)
     putIntoDest(p, d, e,
       cDeref(
@@ -2570,8 +2570,8 @@ proc genCast(p: BProc, e: PNode, d: var TLoc) =
     var lbl = p.labels.rope
     var tmp: TLoc = default(TLoc)
     tmp.snippet = dotField("LOC" & lbl, "source")
-    let destsize = getSize(p.config, destt)
-    let srcsize = getSize(p.config, srct)
+    let destsize = getSize(p.module.g.graph, destt)
+    let srcsize = getSize(p.module.g.graph, srct)
 
     let srcTyp = getTypeDesc(p.module, e[1].typ)
     let destTyp = getTypeDesc(p.module, e.typ)
@@ -2733,7 +2733,7 @@ proc genWasMoved(p: BProc; n: PNode) =
     a = initLocExpr(p, n1, {lfEnforceDeref})
     resetLoc(p, a)
     #linefmt(p, cpsStmts, "#nimZeroMem((void*)$1, sizeof($2));$n",
-    #  [addrLoc(p.config, a), getTypeDesc(p.module, a.t)])
+    #  [addrLoc(p.module.g.graph, a), getTypeDesc(p.module, a.t)])
 
 proc genMove(p: BProc; n: PNode; d: var TLoc) =
   var a: TLoc = initLocExpr(p, n[1].skipAddr, {lfEnforceDeref})
@@ -3078,7 +3078,7 @@ proc genSetConstr(p: BProc, e: PNode, d: var TLoc) =
     putIntoDest(p, d, e, extract(elem))
   else:
     if d.k == locNone: d = getTemp(p, e.typ)
-    let size = getSize(p.config, e.typ)
+    let size = getSize(p.module.g.graph, e.typ)
     if size > 8:
       # big set:
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimZeroMem"),
@@ -3286,7 +3286,7 @@ proc upConv(p: BProc, n: PNode, d: var TLoc) =
       putIntoDest(p, d, n, cCast(destTyp, wrapPar(val)), a.storage)
   else:
     let destTyp = getTypeDesc(p.module, dest)
-    let val = addrLoc(p.config, a)
+    let val = addrLoc(p.module.g.graph, a)
     # (* (destType*) val)
     putIntoDest(p, d, n,
       cDeref(
@@ -3838,7 +3838,7 @@ proc getDefaultValue(p: BProc; typ: PType; info: TLineInfo; result: var Builder)
       result.addField(openArrInit, name = "Field1"):
         result.addIntValue(0)
   of tySet:
-    if mapSetType(p.config, t) == ctArray:
+    if mapSetType(p.module.g.graph, t) == ctArray:
       var setInit: StructInitializer
       result.addStructInitializer(setInit, kind = siArray):
         discard
@@ -4075,8 +4075,8 @@ proc genBracedInit(p: BProc, n: PNode; isConst: bool; optionalType: PType; resul
       ty = typ.kind
     case ty
     of tySet:
-      let cs = toBitSet(p.config, n)
-      genRawSetData(cs, int(getSize(p.config, n.typ)), result)
+      let cs = toBitSet(p.module.g.graph, n)
+      genRawSetData(cs, int(getSize(p.module.g.graph, n.typ)), result)
     of tySequence:
       if optSeqDestructors in p.config.globalOptions:
         genConstSeqV2(p, n, typ, isConst, result)

@@ -264,8 +264,10 @@ proc processPipelineModule*(graph: ModuleGraph; module: PSym; idgen: IdGenerator
         result = @[]
         for dp in graph.deferredPragmas(t):
           result.add(dp.expr)
+      proc getPaddingAtEnd(t: PType): int16 =
+        result = graph.paddingAtEnd(t)
       writeNifModule(graph.config, module.position.int32, topLevelStmts, graph.opsLog, replayActions,
-                     getDeferredPragmas)
+                     getDeferredPragmas, getPaddingAtEnd)
 
   result = true
 

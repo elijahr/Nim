@@ -710,7 +710,7 @@ proc semCaseBranch(c: PContext, n, branch: PNode, branchIndex: int,
         inc(covered)
       else:
         if r.kind == nkCurly:
-          r = deduplicate(c.config, r)
+          r = deduplicate(c.graph, r)
 
         # first element is special and will overwrite: branch[i]:
         branch[i] = semCaseBranchSetElem(c, n, r[0], covered)

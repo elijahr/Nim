@@ -23,13 +23,13 @@ proc checkPartialConstructedType(conf: ConfigRef; info: TLineInfo, t: PType) =
   if t.kind in {tyVar, tyLent} and t.elementType.kind in {tyVar, tyLent}:
     localError(conf, info, "type 'var var' is not allowed")
 
-proc checkConstructedType*(conf: ConfigRef; info: TLineInfo, typ: PType) =
+proc checkConstructedType*(g: ModuleGraph; info: TLineInfo, typ: PType) =
   var t = typ.skipTypes({tyDistinct})
   if t.kind in tyTypeClasses: discard
   elif t.kind in {tyVar, tyLent} and t.elementType.kind in {tyVar, tyLent}:
-    localError(conf, info, "type 'var var' is not allowed")
-  elif computeSize(conf, t) == szIllegalRecursion or isRecursiveStructuralType(t):
-    localError(conf, info, "illegal recursion in type '" & typeToString(t) & "'")
+    localError(g.config, info, "type 'var var' is not allowed")
+  elif computeSize(g, t) == szIllegalRecursion or isRecursiveStructuralType(t):
+    localError(g.config, info, "illegal recursion in type '" & typeToString(t) & "'")
 
 proc substituteTypeParams(n: PNode; body, inst: PType): PNode =
   ## Substitute generic parameter references with instantiated types.

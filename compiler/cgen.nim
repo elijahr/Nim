@@ -415,20 +415,20 @@ template mapTypeChooser(n: PNode): TSymKind =
 
 template mapTypeChooser(a: TLoc): TSymKind = mapTypeChooser(a.lode)
 
-proc addAddrLoc(conf: ConfigRef; a: TLoc; result: var Builder) =
-  if lfIndirect notin a.flags and mapType(conf, a.t, mapTypeChooser(a) == skParam) != ctArray:
+proc addAddrLoc(graph: ModuleGraph; a: TLoc; result: var Builder) =
+  if lfIndirect notin a.flags and mapType(graph, a.t, mapTypeChooser(a) == skParam) != ctArray:
     result.add wrapPar(cAddr(a.snippet))
   else:
     result.add a.snippet
 
-proc addrLoc(conf: ConfigRef; a: TLoc): Rope =
-  if lfIndirect notin a.flags and mapType(conf, a.t, mapTypeChooser(a) == skParam) != ctArray:
+proc addrLoc(graph: ModuleGraph; a: TLoc): Rope =
+  if lfIndirect notin a.flags and mapType(graph, a.t, mapTypeChooser(a) == skParam) != ctArray:
     result = wrapPar(cAddr(a.snippet))
   else:
     result = a.snippet
 
 proc byRefLoc(p: BProc; a: TLoc): Rope =
-  if lfIndirect notin a.flags and mapType(p.config, a.t, mapTypeChooser(a) == skParam) != ctArray and not
+  if lfIndirect notin a.flags and mapType(p.module.g.graph, a.t, mapTypeChooser(a) == skParam) != ctArray and not
       p.module.compileToCpp:
     result = wrapPar(cAddr(a.snippet))
   else:
@@ -492,7 +492,7 @@ proc genObjectInit(p: BProc, section: TCProcSection, t: PType, a: var TLoc,
         genAssignment(p, a, tmp, {})
     else:
       # worst case for performance:
-      var r = if mode == constructObj: addrLoc(p.config, a) else: rdLoc(a)
+      var r = if mode == constructObj: addrLoc(p.module.g.graph, a) else: rdLoc(a)
       p.s(section).addCallStmt(cgsymValue(p.module, "objectInit"),
         r,
         genTypeInfoV1(p.module, t, a.lode.info))
@@ -548,7 +548,7 @@ proc resetLoc(p: BProc, loc: var TLoc) =
       specializeReset(p, loc)
       when false:
         linefmt(p, cpsStmts, "#genericReset((void*)$1, $2);$n",
-                [addrLoc(p.config, loc), genTypeInfoV1(p.module, loc.t, loc.lode.info)])
+                [addrLoc(p.module.g.graph, loc), genTypeInfoV1(p.module, loc.t, loc.lode.info)])
       # XXX: generated reset procs should not touch the m_type
       # field, so disabling this should be safe:
       genObjectInit(p, cpsStmts, loc.t, loc, constructObj)
@@ -560,14 +560,14 @@ proc resetLoc(p: BProc, loc: var TLoc) =
         if lfIndirect in loc.flags:
           #C++ cant be just zeroed. We need to call the ctors
           var tmp = getTemp(p, loc.t)
-          let ral = addrLoc(p.config, loc)
-          let ratmp = addrLoc(p.config, tmp)
+          let ral = addrLoc(p.module.g.graph, loc)
+          let ratmp = addrLoc(p.module.g.graph, tmp)
           p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimCopyMem"),
             cCast(CPointer, ral),
             cCast(CConstPointer, ratmp),
             cSizeof(tyDesc))
       else:
-        let ral = addrLoc(p.config, loc)
+        let ral = addrLoc(p.module.g.graph, loc)
         p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimZeroMem"),
           cCast(CPointer, ral),
           cSizeof(tyDesc))
@@ -596,7 +596,7 @@ proc constructLoc(p: BProc, loc: var TLoc, isTemp = false) =
       # don't use nimZeroMem for temporary values for performance if we can
       # avoid it:
       if not isOrHasImportedCppType(typ):
-        let ral = addrLoc(p.config, loc)
+        let ral = addrLoc(p.module.g.graph, loc)
         let rt = getTypeDesc(p.module, typ, descKindFromSymKind mapTypeChooser(loc))
         p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimZeroMem"),
           cCast(CPointer, ral),
@@ -631,7 +631,7 @@ proc getTemp(p: BProc, t: PType, needsInit=false): TLoc =
   constructLoc(p, result, not needsInit)
   when false:
     # XXX Introduce a compiler switch in order to detect these easily.
-    if getSize(p.config, t) > 1024 * 1024:
+    if getSize(p.module.g.graph, t) > 1024 * 1024:
       if p.prc != nil:
         echo "ENORMOUS TEMPORARY! ", p.config $ p.prc.info
       else:
@@ -1101,7 +1101,7 @@ proc closureSetup(p: BProc, prc: PSym) =
   assignLocalVar(p, ls)
   # generate cast assignment:
   if p.config.selectedGC == gcGo:
-    let renv = addrLoc(p.config, env.loc)
+    let renv = addrLoc(p.module.g.graph, env.loc)
     let rt = getTypeDesc(p.module, env.typ)
     p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "unsureAsgnRef"),
       cCast(ptrType(CPointer), renv),
@@ -1322,7 +1322,7 @@ proc genProcLvl3*(m: BModule, prc: PSym) =
       internalError(m.config, prc.info, "proc has no result symbol")
     let resNode = prc.ast[resultPos]
     let res = resNode.sym # get result symbol
-    if not isInvalidReturnType(m.config, prc.typ) and sfConstructor notin prc.flags:
+    if not isInvalidReturnType(m.g.graph, prc.typ) and sfConstructor notin prc.flags:
       if sfNoInit in prc.flags: incl(res, sfNoInit)
       if sfNoInit in prc.flags and p.module.compileToCpp and (let val = easyResultAsgn(procBody); val != nil):
         var a: TLoc = initLocExprSingleUse(p, val)
@@ -1350,7 +1350,7 @@ proc genProcLvl3*(m: BModule, prc: PSym) =
       backendEnsureMutable prc
       prc.locImpl.snippet = getTypeDesc(m, resNode.sym.locImpl.t, dkVar)
     else:
-      fillResult(p.config, resNode, prc.typ)
+      fillResult(p.module.g.graph, resNode, prc.typ)
       assignParam(p, res, prc.typ.returnType)
       # We simplify 'unsureAsgn(result, nil); unsureAsgn(result, x)'
       # to 'unsureAsgn(result, x)'

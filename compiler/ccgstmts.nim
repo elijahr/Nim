@@ -31,20 +31,20 @@ proc registerTraverseProc(p: BProc, v: PSym) =
     p.module.preInitProc.procSec(cpsInit).addCallStmt(fnName, traverseProc)
     p.module.preInitProc.procSec(cpsInit).add("\n")
 
-proc isAssignedImmediately(conf: ConfigRef; n: PNode): bool {.inline.} =
+proc isAssignedImmediately(graph: ModuleGraph; n: PNode): bool {.inline.} =
   if n.kind == nkEmpty:
     result = false
   elif n.kind in nkCallKinds and n[0] != nil and n[0].typ != nil and n[0].typ.skipTypes(abstractInst).kind == tyProc:
     if n[0].kind == nkSym and sfConstructor in n[0].sym.flags:
       result = true
-    elif isInvalidReturnType(conf, n[0].typ, true):
+    elif isInvalidReturnType(graph, n[0].typ, true):
       # var v = f()
       # is transformed into: var v;  f(addr v)
       # where 'f' **does not** initialize the result!
       result = false
     else:
       result = true
-  elif isInvalidReturnType(conf, n.typ, false):
+  elif isInvalidReturnType(graph, n.typ, false):
     result = false
   else:
     result = true
@@ -133,7 +133,7 @@ proc genVarTuple(p: BProc, n: PNode) =
       registerTraverseProc(p, v)
     else:
       assignLocalVar(p, vn)
-      initLocalVar(p, v, immediateAsgn=isAssignedImmediately(p.config, n[^1]))
+      initLocalVar(p, v, immediateAsgn=isAssignedImmediately(p.module.g.graph, n[^1]))
     var field = initLoc(locExpr, vn, tup.storage)
     let rtup = rdLoc(tup)
     let fieldName =
@@ -354,7 +354,7 @@ proc genSingleVar(p: BProc, v: PSym; vn, value: PNode) =
     # translate 'var state {.goto.} = X' into 'goto LX':
     genGotoVar(p, value)
     return
-  let imm = isAssignedImmediately(p.config, value)
+  let imm = isAssignedImmediately(p.module.g.graph, value)
   let isCppCtorCall = p.module.compileToCpp and imm and
     value.kind in nkCallKinds and value[0].kind == nkSym and
     v.typ.kind != tyPtr and sfConstructor in value[0].sym.flags

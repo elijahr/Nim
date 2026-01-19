@@ -102,6 +102,9 @@ type
     dispatchers*: seq[PSym]
 
     # Type extension tables (sparse metadata storage)
+    typePaddingAtEnd*: Table[ItemId, int16]
+      ## Padding bytes at end of object types. Only populated for tyObject
+      ## during computeSizeAlign when padding is non-zero.
     typeDeferredPragmas*: Table[ItemId, seq[DeferredPragmaExpr]]
       ## Pragma expressions that couldn't be evaluated at declaration time.
       ## Used for size/align pragmas with generic type parameters.
@@ -547,6 +550,7 @@ proc initModuleGraphFields(result: ModuleGraph) =
   result.emittedTypeInfo = initTable[string, FileIndex]()
   result.cachedFiles = newStringTable()
   # Type extension tables
+  result.typePaddingAtEnd = initTable[ItemId, int16]()
   result.typeDeferredPragmas = initTable[ItemId, seq[DeferredPragmaExpr]]()
 
 proc newModuleGraph*(cache: IdentCache; config: ConfigRef): ModuleGraph =
@@ -563,8 +567,14 @@ proc newModuleGraph*(cache: IdentCache; config: ConfigRef): ModuleGraph =
       if not g.typeDeferredPragmas.hasKey(t.itemId):
         g.typeDeferredPragmas[t.itemId] = @[]
       g.typeDeferredPragmas[t.itemId].add(DeferredPragmaExpr(expr: expr))
+    proc setPaddingAtEndCallback(t: PType; val: int16) =
+      if val == 0:
+        if g.typePaddingAtEnd.hasKey(t.itemId):
+          g.typePaddingAtEnd.del(t.itemId)
+      else:
+        g.typePaddingAtEnd[t.itemId] = val
     # Set callbacks on DecodeContext for type extension side-table access during NIF loading
-    setDecodeCallbacks(ast.program, addDeferredPragmaCallback)
+    setDecodeCallbacks(ast.program, addDeferredPragmaCallback, setPaddingAtEndCallback)
 
 proc resetAllModules*(g: ModuleGraph) =
   g.packageSyms = initStrTable()

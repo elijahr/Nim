@@ -1496,10 +1496,27 @@ proc isObjLackingTypeField*(typ: PType): bool {.inline.} =
   result = (typ.kind == tyObject) and ((tfFinal in typ.flags) and
       (typ.baseClass == nil) or isPureObject(typ))
 
+# Side-table accessors for paddingAtEnd (must be before sizealignoffsetimpl include)
+proc paddingAtEnd*(g: ModuleGraph; t: PType): int16 {.inline.} =
+  ## Returns padding bytes at end of type, or 0 if not set.
+  ## Uses side-table in ModuleGraph for sparse storage.
+  if g.typePaddingAtEnd.hasKey(t.itemId):
+    result = g.typePaddingAtEnd[t.itemId]
+  else:
+    result = 0
+
+proc setPaddingAtEnd*(g: ModuleGraph; t: PType; val: int16) {.inline.} =
+  ## Sets padding bytes. Deletes entry if val is 0 (sparse storage).
+  if val == 0:
+    if g.typePaddingAtEnd.hasKey(t.itemId):
+      g.typePaddingAtEnd.del(t.itemId)
+  else:
+    g.typePaddingAtEnd[t.itemId] = val
+
 include sizealignoffsetimpl
 
-proc computeSize*(conf: ConfigRef; typ: PType): BiggestInt =
-  computeSizeAlign(conf, typ)
+proc computeSize*(graph: ModuleGraph; typ: PType): BiggestInt =
+  computeSizeAlign(graph, typ)
   result = typ.size
 
 proc getReturnType*(s: PSym): PType =
@@ -1507,13 +1524,15 @@ proc getReturnType*(s: PSym): PType =
   assert s.kind in skProcKinds
   result = s.typ.returnType
 
-proc getAlign*(conf: ConfigRef; typ: PType): BiggestInt =
-  computeSizeAlign(conf, typ)
+proc getAlign*(graph: ModuleGraph; typ: PType): BiggestInt =
+  computeSizeAlign(graph, typ)
   result = typ.align
 
-proc getSize*(conf: ConfigRef; typ: PType): BiggestInt =
-  computeSizeAlign(conf, typ)
+proc getSize*(graph: ModuleGraph; typ: PType): BiggestInt =
+  computeSizeAlign(graph, typ)
   result = typ.size
+
+# paddingAtEnd accessors moved before sizealignoffsetimpl include
 
 proc deferredPragmas*(g: ModuleGraph; t: PType): seq[DeferredPragmaExpr] =
   ## Returns deferred pragmas for type, or empty seq if none.

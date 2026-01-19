@@ -444,14 +444,14 @@ proc opConv(c: PCtx; dest: var TFullReg, src: TFullReg, desttyp, srctyp: PType):
       of tyFloat..tyFloat64:
         dest.intVal = int(src.floatVal)
       else:
-        let destSize = getSize(c.config, desttyp)
+        let destSize = getSize(c.graph, desttyp)
         let destDist = (sizeof(dest.intVal) - destSize) * 8
         var value = cast[BiggestUInt](src.intVal)
         when false:
           # this would make uint64(-5'i8) evaluate to 251
           # but at runtime, uint64(-5'i8) is 18446744073709551611
           # so don't do it
-          let srcSize = getSize(c.config, styp)
+          let srcSize = getSize(c.graph, styp)
           let srcDist = (sizeof(src.intVal) - srcSize) * 8
           value = (value shl srcDist) shr srcDist
         value = (value shl destDist) shr destDist
@@ -1059,12 +1059,12 @@ proc rawExecute(c: PCtx, start: int, tos: PStackFrame): TFullReg =
       decodeB(rkNode)
       var b = newNodeIT(nkCurly, regs[ra].node.info, regs[ra].node.typ)
       b.add regs[rb].regToNode
-      var r = diffSets(c.config, regs[ra].node, b)
+      var r = diffSets(c.graph, regs[ra].node, b)
       discardSons(regs[ra].node)
       for i in 0..<r.len: regs[ra].node.add r[i]
     of opcCard:
       decodeB(rkInt)
-      regs[ra].intVal = nimsets.cardSet(c.config, regs[rb].node)
+      regs[ra].intVal = nimsets.cardSet(c.graph, regs[rb].node)
     of opcMulInt:
       decodeBC(rkInt)
       let
@@ -1255,35 +1255,35 @@ proc rawExecute(c: PCtx, start: int, tos: PStackFrame): TFullReg =
       regs[ra].intVal = ord(regs[rb].node.strVal < regs[rc].node.strVal)
     of opcLeSet:
       decodeBC(rkInt)
-      regs[ra].intVal = ord(containsSets(c.config, regs[rb].node, regs[rc].node))
+      regs[ra].intVal = ord(containsSets(c.graph, regs[rb].node, regs[rc].node))
     of opcEqSet:
       decodeBC(rkInt)
-      regs[ra].intVal = ord(equalSets(c.config, regs[rb].node, regs[rc].node))
+      regs[ra].intVal = ord(equalSets(c.graph, regs[rb].node, regs[rc].node))
     of opcLtSet:
       decodeBC(rkInt)
       let a = regs[rb].node
       let b = regs[rc].node
-      regs[ra].intVal = ord(containsSets(c.config, a, b) and not equalSets(c.config, a, b))
+      regs[ra].intVal = ord(containsSets(c.graph, a, b) and not equalSets(c.graph, a, b))
     of opcMulSet:
       decodeBC(rkNode)
       createSet(regs[ra])
       move(regs[ra].node.sons,
-            nimsets.intersectSets(c.config, regs[rb].node, regs[rc].node).sons)
+            nimsets.intersectSets(c.graph, regs[rb].node, regs[rc].node).sons)
     of opcPlusSet:
       decodeBC(rkNode)
       createSet(regs[ra])
       move(regs[ra].node.sons,
-           nimsets.unionSets(c.config, regs[rb].node, regs[rc].node).sons)
+           nimsets.unionSets(c.graph, regs[rb].node, regs[rc].node).sons)
     of opcMinusSet:
       decodeBC(rkNode)
       createSet(regs[ra])
       move(regs[ra].node.sons,
-           nimsets.diffSets(c.config, regs[rb].node, regs[rc].node).sons)
+           nimsets.diffSets(c.graph, regs[rb].node, regs[rc].node).sons)
     of opcXorSet:
       decodeBC(rkNode)
       createSet(regs[ra])
       move(regs[ra].node.sons,
-           nimsets.symdiffSets(c.config, regs[rb].node, regs[rc].node).sons)
+           nimsets.symdiffSets(c.graph, regs[rb].node, regs[rc].node).sons)
     of opcConcatStr:
       decodeBC(rkNode)
       createStr regs[ra]
@@ -1427,7 +1427,7 @@ proc rawExecute(c: PCtx, start: int, tos: PStackFrame): TFullReg =
           var slots2: TNodeSeq = newSeq[PNode](tos.slots.len)
           for i in 0..<tos.slots.len:
             slots2[i] = regToNode(tos.slots[i])
-          let newValue = callForeignFunction(c.config, prcValue, prc.typ, slots2,
+          let newValue = callForeignFunction(c.graph, prcValue, prc.typ, slots2,
                                              rb+1, rc-1, c.debug[pc])
           if newValue.kind != nkEmpty:
             assert instr.opcode == opcIndCallAsgn
@@ -1914,12 +1914,12 @@ proc rawExecute(c: PCtx, start: int, tos: PStackFrame): TFullReg =
         if n.typ == nil:
           stackTrace(c, tos, pc, "node has no type")
         else:
-          regs[ra].intVal = getSize(c.config, n.typ)
+          regs[ra].intVal = getSize(c.graph, n.typ)
       of 1: # align
         if n.typ == nil:
           stackTrace(c, tos, pc, "node has no type")
         else:
-          regs[ra].intVal = getAlign(c.config, n.typ)
+          regs[ra].intVal = getAlign(c.graph, n.typ)
       else: # offset
         if n.kind != nkSym:
           stackTrace(c, tos, pc, "node is not a symbol")
@@ -2132,7 +2132,7 @@ proc rawExecute(c: PCtx, start: int, tos: PStackFrame): TFullReg =
       let srctyp = c.types[c.code[pc].regBx - wordExcess]
 
       when hasFFI:
-        let dest = fficast(c.config, regs[rb].node, desttyp)
+        let dest = fficast(c.graph, regs[rb].node, desttyp)
         # todo: check whether this is correct
         # asgnRef(regs[ra], dest)
         putIntoReg(regs[ra], dest)

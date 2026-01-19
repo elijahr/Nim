@@ -106,7 +106,7 @@ proc fixupCall(p: BProc, le, ri: PNode, d: var TLoc,
     if typ.returnType.kind in {tyOpenArray, tyVarargs}:
       # perhaps generate no temp if the call doesn't have side effects
       flags.incl needTempForOpenArray
-    if isInvalidReturnType(p.config, typ):
+    if isInvalidReturnType(p.module.g.graph, typ):
       # beware of 'result = p(result)'. We may need to allocate a temporary:
       if d.k in {locTemp, locNone} or not preventNrvo(p, d.lode, le, ri):
         # Great, we can use 'd':
@@ -114,7 +114,7 @@ proc fixupCall(p: BProc, le, ri: PNode, d: var TLoc,
         elif d.k notin {locTemp} and not hasNoInit(ri):
           # reset before pass as 'result' var:
           discard "resetLoc(p, d)"
-        let rad = addrLoc(p.config, d)
+        let rad = addrLoc(p.module.g.graph, d)
         result.addArgument(call):
           result.add(rad)
         result.finishCallBuilder(call)
@@ -122,7 +122,7 @@ proc fixupCall(p: BProc, le, ri: PNode, d: var TLoc,
           p.s(cpsStmts).add(extract(result))
       else:
         var tmp: TLoc = getTemp(p, typ.returnType, needsInit=true)
-        let ratmp = addrLoc(p.config, tmp)
+        let ratmp = addrLoc(p.module.g.graph, tmp)
         result.addArgument(call):
           result.add(ratmp)
         result.finishCallBuilder(call)
@@ -332,7 +332,7 @@ proc withTmpIfNeeded(p: BProc, a: TLoc, needsTmp: bool): TLoc =
   # Aliasing is preferred over stack overflows.
   # Also don't regress for non ARC-builds, too risky.
   if needsTmp and a.lode.typ != nil and p.config.selectedGC in {gcArc, gcAtomicArc, gcOrc} and
-      getSize(p.config, a.lode.typ) < 1024:
+      getSize(p.module.g.graph, a.lode.typ) < 1024:
     result = getTemp(p, a.lode.typ, needsInit=false)
     genAssignment(p, result, a, {})
   else:
@@ -354,19 +354,19 @@ proc genArg(p: BProc, n: PNode, param: PSym; call: PNode; result: var Builder; n
   elif skipTypes(param.typ, abstractVar).kind in {tyOpenArray, tyVarargs}:
     var n = if n.kind != nkHiddenAddr: n else: n[0]
     openArrayLoc(p, param.typ, n, result)
-  elif ccgIntroducedPtr(p.config, param, call[0].typ.returnType) and
+  elif ccgIntroducedPtr(p.module.g.graph, param, call[0].typ.returnType) and
     (optByRef notin param.options or not p.module.compileToCpp):
     a = initLocExpr(p, n)
     if n.kind in {nkCharLit..nkNilLit}:
-      addAddrLoc(p.config, expressionsNeedsTmp(p, a), result)
+      addAddrLoc(p.module.g.graph, expressionsNeedsTmp(p, a), result)
     else:
-      addAddrLoc(p.config, withTmpIfNeeded(p, a, needsTmp), result)
+      addAddrLoc(p.module.g.graph, withTmpIfNeeded(p, a, needsTmp), result)
   elif p.module.compileToCpp and param.typ.kind in {tyVar} and
       n.kind == nkHiddenAddr:
     # bug #23748: we need to introduce a temporary here. The expression type
     # will be a reference in C++ and we cannot create a temporary reference
     # variable. Thus, we create a temporary pointer variable instead.
-    let needsIndirect = mapType(p.config, n[0].typ, mapTypeChooser(n[0]) == skParam) != ctArray
+    let needsIndirect = mapType(p.module.g.graph, n[0].typ, mapTypeChooser(n[0]) == skParam) != ctArray
     if needsIndirect:
       n.typ = n.typ.exactReplica
       n.typ.incl tfVarIsPtr
@@ -380,7 +380,7 @@ proc genArg(p: BProc, n: PNode, param: PSym; call: PNode; result: var Builder; n
         {sfImportc, sfInfixCall, sfCompilerProc} * callee.sym.flags == {sfImportc} and
         {lfHeader, lfNoDecl} * callee.sym.loc.flags != {} and
         needsIndirect:
-      addAddrLoc(p.config, a, result)
+      addAddrLoc(p.module.g.graph, a, result)
     else:
       addRdLoc(a, result)
   else:
@@ -533,7 +533,7 @@ proc genClosureCall(p: BProc, le, ri: PNode, d: var TLoc) =
   let rawProc = getClosureType(p.module, typ, clHalf)
   let canRaise = p.config.exc == excGoto and canRaiseDisp(p, ri[0])
   if typ.returnType != nil:
-    if isInvalidReturnType(p.config, typ):
+    if isInvalidReturnType(p.module.g.graph, typ):
       # beware of 'result = p(result)'. We may need to allocate a temporary:
       if d.k in {locTemp, locNone} or not preventNrvo(p, d.lode, le, ri):
         # Great, we can use 'd':
@@ -543,13 +543,13 @@ proc genClosureCall(p: BProc, le, ri: PNode, d: var TLoc) =
           # reset before pass as 'result' var:
           discard "resetLoc(p, d)"
         params.addArgument(argBuilder):
-          params.add(addrLoc(p.config, d))
+          params.add(addrLoc(p.module.g.graph, d))
         genCallPattern()
         if canRaise: raiseExit(p)
       else:
         var tmp: TLoc = getTemp(p, typ.returnType, needsInit=true)
         params.addArgument(argBuilder):
-          params.add(addrLoc(p.config, tmp))
+          params.add(addrLoc(p.module.g.graph, tmp))
         genCallPattern()
         if canRaise: raiseExit(p)
         genAssignment(p, d, tmp, {}) # no need for deep copying
@@ -826,20 +826,20 @@ proc genNamedParamCall(p: BProc, ri: PNode, d: var TLoc) =
     pl.add(": ")
     genArg(p, ri[i], param, ri, pl)
   if typ.returnType != nil:
-    if isInvalidReturnType(p.config, typ):
+    if isInvalidReturnType(p.module.g.graph, typ):
       if ri.len > 1: pl.add(" ")
       # beware of 'result = p(result)'. We always allocate a temporary:
       if d.k in {locTemp, locNone}:
         # We already got a temp. Great, special case it:
         if d.k == locNone: d = getTemp(p, typ.returnType, needsInit=true)
         pl.add("Result: ")
-        pl.add(addrLoc(p.config, d))
+        pl.add(addrLoc(p.module.g.graph, d))
         pl.add("]")
         p.s(cpsStmts).addStmt():
           p.s(cpsStmts).add(extract(pl))
       else:
         var tmp: TLoc = getTemp(p, typ.returnType, needsInit=true)
-        pl.add(addrLoc(p.config, tmp))
+        pl.add(addrLoc(p.module.g.graph, tmp))
         pl.add("]")
         p.s(cpsStmts).addStmt():
           p.s(cpsStmts).add(extract(pl))

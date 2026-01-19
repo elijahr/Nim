@@ -793,7 +793,7 @@ proc genNarrow(c: PCtx; n: PNode; dest: TDest) =
   let t = skipTypes(n.typ, abstractVar-{tyTypeDesc})
   # uint is uint64 in the VM, we we only need to mask the result for
   # other unsigned types:
-  let size = getSize(c.config, t)
+  let size = getSize(c.graph, t)
   if t.kind in {tyUInt8..tyUInt32} or (t.kind == tyUInt and size < 8):
     c.gABC(n, opcNarrowU, dest, TRegister(size*8))
   elif t.kind in {tyInt8..tyInt32} or (t.kind == tyInt and size < 8):
@@ -808,7 +808,7 @@ proc genNarrowU(c: PCtx; n: PNode; dest: TDest) =
   let t = skipTypes(n.typ, abstractVar-{tyTypeDesc})
   # uint is uint64 in the VM, we we only need to mask the result for
   # other unsigned types:
-  let size = getSize(c.config, t)
+  let size = getSize(c.graph, t)
   if t.kind in {tyUInt8..tyUInt32, tyInt8..tyInt32} or
     (t.kind in {tyUInt, tyInt} and size < 8):
     c.gABC(n, opcNarrowU, dest, TRegister(size*8))
@@ -935,8 +935,8 @@ proc genCastIntFloat(c: PCtx; n: PNode; dest: var TDest) =
 
   let src = n[1].typ.skipTypes(abstractRange)#.kind
   let dst = n[0].typ.skipTypes(abstractRange)#.kind
-  let srcSize = getSize(c.config, src)
-  let dstSize = getSize(c.config, dst)
+  let srcSize = getSize(c.graph, src)
+  let dstSize = getSize(c.graph, dst)
   const unsupportedCastDifferentSize =
     "VM does not support 'cast' from $1 with size $2 to $3 with size $4 due to different sizes"
   if src.kind in allowedIntegers and dst.kind in allowedIntegers:
@@ -1174,7 +1174,7 @@ proc genMagic(c: PCtx; n: PNode; dest: var TDest; flags: TGenFlags = {}, m: TMag
     # modified: genBinaryABC(c, n, dest, opcShrInt)
     # narrowU is applied to the left operand the idea here is to narrow the left operand
     let typ = skipTypes(n.typ, abstractVar-{tyTypeDesc})
-    let size = getSize(c.config, typ)
+    let size = getSize(c.graph, typ)
     let tmp = c.genx(n[1])
     c.genNarrowU(n, tmp)
     let tmp2 = c.genx(n[2])
@@ -1185,7 +1185,7 @@ proc genMagic(c: PCtx; n: PNode; dest: var TDest; flags: TGenFlags = {}, m: TMag
     c.freeTemp(tmp2)
   of mShlI:
     let typ = skipTypes(n.typ, abstractVar-{tyTypeDesc})
-    let size = getSize(c.config, typ)
+    let size = getSize(c.graph, typ)
     let tmp1 = c.genx(n[1])
     let tmp2 = c.genx(n[2])
     if dest < 0: dest = c.getTemp(n.typ)
@@ -1200,7 +1200,7 @@ proc genMagic(c: PCtx; n: PNode; dest: var TDest; flags: TGenFlags = {}, m: TMag
       c.gABC(n, opcSignExtend, dest, TRegister(size*8))
   of mAshrI:
     let typ = skipTypes(n.typ, abstractVar-{tyTypeDesc})
-    let size = getSize(c.config, typ)
+    let size = getSize(c.graph, typ)
     let tmp1 = c.genx(n[1])
     let tmp2 = c.genx(n[2])
     if dest < 0: dest = c.getTemp(n.typ)
@@ -1242,7 +1242,7 @@ proc genMagic(c: PCtx; n: PNode; dest: var TDest; flags: TGenFlags = {}, m: TMag
     genUnaryABC(c, n, dest, opcBitnotInt)
     #genNarrowU modified, do not narrow signed types
     let t = skipTypes(n.typ, abstractVar-{tyTypeDesc})
-    let size = getSize(c.config, t)
+    let size = getSize(c.graph, t)
     if t.kind in {tyUInt8..tyUInt32} or (t.kind == tyUInt and size < 8):
       c.gABC(n, opcNarrowU, dest, TRegister(size*8))
   of mCharToStr, mBoolToStr, mCStrToStr, mStrToStr, mEnumToStr:
@@ -1754,7 +1754,7 @@ proc importcCond*(c: PCtx; s: PSym): bool {.inline.} =
 proc importcSym(c: PCtx; info: TLineInfo; s: PSym) =
   when hasFFI:
     if compiletimeFFI in c.config.features:
-      c.globals.add(importcSymbol(c.config, s))
+      c.globals.add(importcSymbol(c.graph, s))
       s.position = c.globals.len
     else:
       localError(c.config, info,
