@@ -259,15 +259,11 @@ proc processPipelineModule*(graph: ModuleGraph; module: PSym; idgen: IdGenerator
           if m == module:
             replayActions.add n
 
-      # Create callbacks for type extension side-tables
-      proc getDeferredPragmas(t: PType): seq[PNode] =
-        result = @[]
-        for dp in graph.deferredPragmas(t):
-          result.add(dp.expr)
+      # Create callback for type extension side-table
       proc getPaddingAtEnd(t: PType): int16 =
         result = graph.paddingAtEnd(t)
       writeNifModule(graph.config, module.position.int32, topLevelStmts, graph.opsLog, replayActions,
-                     getDeferredPragmas, getPaddingAtEnd)
+                     getPaddingAtEnd)
 
   result = true
 

@@ -1532,30 +1532,6 @@ proc getSize*(graph: ModuleGraph; typ: PType): BiggestInt =
   computeSizeAlign(graph, typ)
   result = typ.size
 
-# paddingAtEnd accessors moved before sizealignoffsetimpl include
-
-proc deferredPragmas*(g: ModuleGraph; t: PType): seq[DeferredPragmaExpr] =
-  ## Returns deferred pragmas for type, or empty seq if none.
-  if g.typeDeferredPragmas.hasKey(t.itemId):
-    result = g.typeDeferredPragmas[t.itemId]
-  else:
-    result = @[]
-
-proc addDeferredPragma*(g: ModuleGraph; t: PType; expr: PNode) =
-  ## Adds a deferred pragma expression to the type.
-  if not g.typeDeferredPragmas.hasKey(t.itemId):
-    g.typeDeferredPragmas[t.itemId] = @[]
-  g.typeDeferredPragmas[t.itemId].add(DeferredPragmaExpr(expr: expr))
-
-proc clearDeferredPragmas*(g: ModuleGraph; t: PType) =
-  ## Removes all deferred pragmas for type (after evaluation).
-  if g.typeDeferredPragmas.hasKey(t.itemId):
-    g.typeDeferredPragmas.del(t.itemId)
-
-proc hasDeferredPragmas*(g: ModuleGraph; t: PType): bool =
-  ## Returns true if type has pending deferred pragmas.
-  g.typeDeferredPragmas.hasKey(t.itemId)
-
 proc setImportedTypeSize*(conf: ConfigRef, t: PType, size: int) =
   t.size = size
   if tfPacked in t.flags or size <= 1:

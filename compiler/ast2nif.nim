@@ -157,10 +157,7 @@ let
 type
   # Callback types for type extension side-table access (avoids circular import with modulegraphs)
   # Using closures to allow capturing ModuleGraph reference
-  # Using seq[PNode] instead of seq[DeferredPragmaExpr] to avoid the dependency
-  GetDeferredPragmasCallback* = proc(t: PType): seq[PNode]
   GetPaddingAtEndCallback* = proc(t: PType): int16
-  AddDeferredPragmaCallback* = proc(t: PType; expr: PNode)
   SetPaddingAtEndCallback* = proc(t: PType; val: int16)
 
   Writer = object
@@ -174,7 +171,6 @@ type
     #writtenSyms: seq[PSym]    # symbols written in this module, to be unloaded later
     writtenPackages: HashSet[string]
     # Callbacks for type extension side-tables (set via writeNifModule)
-    getDeferredPragmas: GetDeferredPragmasCallback
     getPaddingAtEnd: GetPaddingAtEndCallback
 
 const
@@ -266,36 +262,25 @@ proc writeLoc(w: var Writer; dest: var TokenBuf; loc: TLoc) =
   dest.addStrLit loc.snippet
 
 proc writeTypeExtensions(w: var Writer; dest: var TokenBuf; typ: PType) =
-  ## Serialize type extensions (deferred pragmas, padding) as NIF pragmas for persistence.
-  ## Format: (pragmas (pragma "deferred_size" <expr>) (pragma "padding_at_end" <int>))
+  ## Serialize type extensions (paddingAtEnd) as NIF pragmas for persistence.
+  ## Format: (pragmas (pragma "padding_at_end" <int>))
   ## If no extensions, writes DotToken (empty).
-
-  # Check for deferred pragmas (via callback if set)
-  var deferredPragmas: seq[PNode] = @[]
-  if w.getDeferredPragmas != nil:
-    deferredPragmas = w.getDeferredPragmas(typ)
 
   # Check for paddingAtEnd (via callback if set)
   var padding: int16 = 0
   if w.getPaddingAtEnd != nil:
     padding = w.getPaddingAtEnd(typ)
 
-  if deferredPragmas.len == 0 and padding == 0:
+  if padding == 0:
     dest.addDotToken()
     return
 
   # Build (pragmas ...) node
   dest.buildTree pragmasTag:
-    # Write deferred pragmas
-    for expr in deferredPragmas:
-      dest.buildTree pragmaTag:
-        dest.addStrLit "deferred_size"
-        writeNode(w, dest, expr)
     # Write paddingAtEnd if non-zero
-    if padding != 0:
-      dest.buildTree pragmaTag:
-        dest.addStrLit "padding_at_end"
-        dest.addIntLit padding.int64
+    dest.buildTree pragmaTag:
+      dest.addStrLit "padding_at_end"
+      dest.addIntLit padding.int64
 
 proc writeTypeDef(w: var Writer; dest: var TokenBuf; typ: PType) =
   dest.buildTree tdefTag:
@@ -755,10 +740,9 @@ proc writeOp(w: var Writer; content: var TokenBuf; op: LogEntry) =
 proc writeNifModule*(config: ConfigRef; thisModule: int32; n: PNode;
                      opsLog: seq[LogEntry];
                      replayActions: seq[PNode] = @[];
-                     getDeferredPragmas: GetDeferredPragmasCallback = nil;
                      getPaddingAtEnd: GetPaddingAtEndCallback = nil) =
   var w = Writer(infos: LineInfoWriter(config: config), currentModule: thisModule,
-                 getDeferredPragmas: getDeferredPragmas, getPaddingAtEnd: getPaddingAtEnd)
+                 getPaddingAtEnd: getPaddingAtEnd)
   var content = createTokenBuf(300)
 
   let rootInfo = trLineInfo(w, n.info)
@@ -877,7 +861,6 @@ type
     mods: Table[FileIndex, NifModule]
     cache: IdentCache
     # Callbacks for populating type extension side-tables during loading
-    addDeferredPragma*: AddDeferredPragmaCallback
     setPaddingAtEnd*: SetPaddingAtEndCallback
 
 proc createDecodeContext*(config: ConfigRef; cache: IdentCache): DecodeContext =
@@ -886,11 +869,9 @@ proc createDecodeContext*(config: ConfigRef; cache: IdentCache): DecodeContext =
   # Callbacks are nil initially, must be set via setDecodeCallbacks after ModuleGraph is created
 
 proc setDecodeCallbacks*(c: var DecodeContext;
-                         addDeferredPragma: AddDeferredPragmaCallback;
                          setPaddingAtEnd: SetPaddingAtEndCallback) =
   ## Sets the callbacks for populating type extension side-tables during loading.
   ## Must be called after createDecodeContext and after ModuleGraph is created.
-  c.addDeferredPragma = addDeferredPragma
   c.setPaddingAtEnd = setPaddingAtEnd
 
 proc cursorFromIndexEntry(c: var DecodeContext; module: FileIndex; entry: NifIndexEntry;
@@ -1139,9 +1120,9 @@ proc loadLoc(c: var DecodeContext; n: var Cursor; loc: var TLoc) =
 
 proc loadTypeExtensions(c: var DecodeContext; n: var Cursor; t: PType;
                         thisModule: string; localSyms: var Table[string, PSym]) =
-  ## Load type extensions from NIF pragmas into side-tables.
+  ## Load type extensions (paddingAtEnd) from NIF pragmas into side-tables.
   ## Handles backwards compatibility: if no pragmas present (old format), skips gracefully.
-  ## Format: (pragmas (pragma "deferred_size" <expr>) (pragma "padding_at_end" <int>)) or DotToken
+  ## Format: (pragmas (pragma "padding_at_end" <int>)) or DotToken
   if n.kind == DotToken:
     # No extensions (or old format that didn't have this slot)
     inc n
@@ -1158,11 +1139,6 @@ proc loadTypeExtensions(c: var DecodeContext; n: var Cursor; t: PType;
           let pragmaName = pool.strings[n.litId]
           inc n
           case pragmaName
-          of "deferred_size":
-            # Load the expression and add to deferred pragmas
-            let expr = loadNode(c, n, thisModule, localSyms)
-            if c.addDeferredPragma != nil and expr != nil:
-              c.addDeferredPragma(t, expr)
           of "padding_at_end":
             # Load the int16 value and set in side-table
             if n.kind == IntLit:

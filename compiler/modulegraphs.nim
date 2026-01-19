@@ -54,11 +54,6 @@ type
     Docgen2JsonPass
     Docgen2Pass
 
-  DeferredPragmaExpr* = object
-    ## Stores a pragma expression whose evaluation was deferred until
-    ## type size is known (e.g., size pragma with generic parameter)
-    expr*: PNode        # The original pragma expression AST
-
   ModuleGraph* {.acyclic.} = ref object
     ifaces*: seq[Iface]  ## indexed by int32 fileIdx
 
@@ -105,9 +100,6 @@ type
     typePaddingAtEnd*: Table[ItemId, int16]
       ## Padding bytes at end of object types. Only populated for tyObject
       ## during computeSizeAlign when padding is non-zero.
-    typeDeferredPragmas*: Table[ItemId, seq[DeferredPragmaExpr]]
-      ## Pragma expressions that couldn't be evaluated at declaration time.
-      ## Used for size/align pragmas with generic type parameters.
 
     systemModule*: PSym
     sysTypes*: array[TTypeKind, PType]
@@ -551,7 +543,6 @@ proc initModuleGraphFields(result: ModuleGraph) =
   result.cachedFiles = newStringTable()
   # Type extension tables
   result.typePaddingAtEnd = initTable[ItemId, int16]()
-  result.typeDeferredPragmas = initTable[ItemId, seq[DeferredPragmaExpr]]()
 
 proc newModuleGraph*(cache: IdentCache; config: ConfigRef): ModuleGraph =
   result = ModuleGraph()
@@ -563,10 +554,6 @@ proc newModuleGraph*(cache: IdentCache; config: ConfigRef): ModuleGraph =
     # Create closure-based callbacks that capture `result` (the ModuleGraph)
     # Direct table operations to avoid circular dependency with types.nim
     let g = result  # capture reference
-    proc addDeferredPragmaCallback(t: PType; expr: PNode) =
-      if not g.typeDeferredPragmas.hasKey(t.itemId):
-        g.typeDeferredPragmas[t.itemId] = @[]
-      g.typeDeferredPragmas[t.itemId].add(DeferredPragmaExpr(expr: expr))
     proc setPaddingAtEndCallback(t: PType; val: int16) =
       if val == 0:
         if g.typePaddingAtEnd.hasKey(t.itemId):
@@ -574,7 +561,7 @@ proc newModuleGraph*(cache: IdentCache; config: ConfigRef): ModuleGraph =
       else:
         g.typePaddingAtEnd[t.itemId] = val
     # Set callbacks on DecodeContext for type extension side-table access during NIF loading
-    setDecodeCallbacks(ast.program, addDeferredPragmaCallback, setPaddingAtEndCallback)
+    setDecodeCallbacks(ast.program, setPaddingAtEndCallback)
 
 proc resetAllModules*(g: ModuleGraph) =
   g.packageSyms = initStrTable()
