@@ -103,8 +103,11 @@ type
 
     # Type extension tables (sparse metadata storage)
     typePaddingAtEnd*: Table[ItemId, int16]
-      ## Padding bytes at end of object types. Only populated for tyObject
-      ## during computeSizeAlign when padding is non-zero.
+      ## Padding bytes at end of types. Populated during computeSizeAlign for:
+      ## tyObject, tyTuple, tyRange, tyInferred, tyGenericInst, tyDistinct,
+      ## tyGenericBody, tyAlias, tySink, tyOwned, tyTypeClasses, tyTypeDesc,
+      ## tyForward, tyStatic, and error cases (illegal recursion, pointer types).
+      ## Only stores non-zero values (sparse storage).
     typeDeferredPragmas*: Table[ItemId, seq[DeferredPragmaExpr]]
       ## Pragma expressions that couldn't be evaluated at declaration time.
       ## Used for size/align pragmas with generic type parameters.
