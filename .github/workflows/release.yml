@@ -17,7 +17,7 @@ jobs:
     with:
       source_repo: ${{ github.repository }}        # elijahr/Nim
       ref: ${{ github.event.inputs.ref || github.sha }}
-      matrix_subset: '["x86_64-linux-musl"]'       # Tranche 1: proven single target only (widened per tranche)
+      matrix_subset: '["x86_64-linux-musl","i686-linux-musl","aarch64-linux-musl","armv7l-linux-musleabihf"]'   # Tranche 2: all four musl-Linux triples (widened per tranche)
     secrets: inherit
 
   release:
