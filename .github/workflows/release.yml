@@ -1,203 +1,69 @@
 name: Release
-
 on:
   push:
-    tags:
-      - 'v*'
-      - '*-test*'
+    tags: [ 'v*', '*-test*' ]
   workflow_dispatch:
     inputs:
       ref:
         description: 'Git ref to build (defaults to triggering ref)'
         required: false
         default: ''
-
 permissions:
   contents: write
 
 jobs:
-  setup:
-    name: 'Resolve build settings'
-    runs-on: ubuntu-22.04
-    outputs:
-      commit: ${{ steps.resolve.outputs.commit }}
-      tag: ${{ steps.resolve.outputs.tag }}
-      environment: ${{ steps.resolve.outputs.environment }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
-          fetch-depth: 0
-          path: nim
-      - name: Resolve commit, tag and environment
-        id: resolve
-        shell: bash
-        working-directory: nim
-        run: |
-          commit=$(git rev-parse HEAD)
-          if [[ '${{ github.ref_type }}' == 'tag' ]]; then
-            tag='${{ github.ref_name }}'
-          else
-            tag="manual-$(date -u +%Y%m%d%H%M%S)-${commit:0:8}"
-          fi
-          environment=$(jq -nc --arg e "$(date -u +%s)" '{ SOURCE_CODE_EPOCH: $e }')
-          echo "commit=$commit"           >> "$GITHUB_OUTPUT"
-          echo "tag=$tag"                 >> "$GITHUB_OUTPUT"
-          echo "environment=$environment" >> "$GITHUB_OUTPUT"
-
-  sourceArchive:
-    needs: setup
-    name: 'source'
-    runs-on: ubuntu-22.04
-    env: ${{ fromJson(needs.setup.outputs.environment) }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          ref: ${{ needs.setup.outputs.commit }}
-          path: nim
-      - name: Get csources version
-        id: csources-version
-        shell: bash
-        run: |
-          csources_repo=nim-lang/csources_v2
-          csources_commit=$(git ls-remote "https://github.com/$csources_repo" master | cut -f 1)
-          if [[ -f nim/config/build_config.txt ]]; then
-            . nim/config/build_config.txt
-            csources_repo=${nim_csourcesUrl#https://github.com/}
-            csources_repo=${csources_repo%.git}
-            csources_commit=$nim_csourcesHash
-          fi
-          echo "repo=$csources_repo"     >> "$GITHUB_OUTPUT"
-          echo "commit=$csources_commit" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ steps.csources-version.outputs.repo }}
-          ref: ${{ steps.csources-version.outputs.commit }}
-          path: csources
-      - name: Setup environment
-        shell: bash
-        run: echo '${{ github.workspace }}/nim/bin' >> "$GITHUB_PATH"
-      - name: Build 1-stage csources compiler
-        shell: bash
-        run: |
-          make -C csources -j "$(nproc)" CC=gcc
-          cp csources/bin/nim nim/bin
-      - name: Build compiler
-        shell: bash
-        working-directory: nim
-        run: |
-          nim c koch
-          ./koch boot -d:release
-      - name: Generate csources
-        shell: bash
-        working-directory: nim
-        run: ./koch csources -d:danger '-d:gitHash:${{ needs.setup.outputs.commit }}'
-      - name: Bundle external sources
-        shell: bash
-        working-directory: nim
-        run: |
-          version=$(nim secret --hints:off <<< 'echo NimVersion; quit 0')
-          major=${version%%.*}
-          minor=${version#*.}; minor=${minor%.*}
-          ./koch nimble
-          if [[ $major -ge 1 && $minor -ge 4 ]]; then ./koch fusion; fi
-      - name: Build source archive
-        shell: bash
-        working-directory: nim
-        run: |
-          ./koch xz
-          mkdir -p output
-          source=$(basename build/nim-*.tar.xz)
-          version=${source%.tar.xz}; version=${version#nim-}
-          cp "build/$source" "output/nim-$version.tar.xz"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: 'nim-${{ needs.setup.outputs.commit }}'
-          path: nim/output/*
-
   build:
-    needs: [ setup, sourceArchive ]
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - os: linux
-            triple: x86_64-linux-musl
-        include:
-          - target:
-              os: linux
-            builder: ubuntu-22.04
-    env: ${{ fromJson(needs.setup.outputs.environment) }}
-    name: '${{ matrix.target.triple }}'
-    runs-on: ${{ matrix.builder }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          ref: ${{ needs.setup.outputs.commit }}
-          path: nightlies
-      - name: Install dependencies
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: nightlies/ci/nightlies/deps.sh -t '${{ matrix.target.triple }}'
-      - uses: actions/download-artifact@v4
-        with:
-          name: 'nim-${{ needs.setup.outputs.commit }}'
-          path: source
-      - name: Extract source package
-        id: source
-        shell: bash
-        run: |
-          source=( source/nim-*.tar.xz )
-          version=${source[0]##*nim-}
-          version=${version%%.tar.xz}
-          case '${{ runner.os }}' in
-            'Windows') 7z x -so "${source[0]}" | 7z x -si -ttar -aoa ;;
-            *) tar xJf "${source[0]}" ;;
-          esac
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Setup environment
-        shell: bash
-        run: echo "-d:gitHash:\"${{ needs.setup.outputs.commit }}\"" >> external/nim.cfg
-      - name: Build release binaries
-        shell: bash
-        run: nightlies/ci/nightlies/build-release.sh 'nim-${{ steps.source.outputs.version }}'
-      - name: Prepare binaries for upload
-        id: release
-        shell: bash
-        run: |
-          source nightlies/ci/nightlies/lib.sh
-          artifact=$(< output/nim.txt)
-          echo "artifact_nativepath=$(nativepath "$artifact")" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: 'binaries-${{ matrix.target.triple }}'
-          path: '${{ steps.release.outputs.artifact_nativepath }}'
+    uses: elijahr/nightlies/.github/workflows/build.yml@validation   # validation: branch ref; pin to SHA in Task 13
+    with:
+      source_repo: ${{ github.repository }}        # elijahr/Nim
+      ref: ${{ github.event.inputs.ref || github.sha }}
+      matrix_subset: '["x86_64-linux-musl"]'       # Tranche 1: proven single target only (widened per tranche)
+    secrets: inherit
 
   release:
-    needs: [ setup, build ]
-    name: 'Publish GitHub Release'
+    needs: [ build ]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      # F6: download binaries-* WITHOUT merge-multiple so each artifact lands in its own
+      # binaries-<triple>/ subdir under bin/ — this is what makes the guard's dir-count meaningful.
+      - name: Download per-triple binary artifacts
+        uses: actions/download-artifact@v4
         with:
           pattern: 'binaries-*'
-          merge-multiple: true
-          path: assets
-      - uses: actions/download-artifact@v4
+          path: bin            # → bin/binaries-<triple>/<file> per artifact (NO merge-multiple)
+      - name: Download source archive
+        uses: actions/download-artifact@v4
         with:
-          name: 'nim-${{ needs.setup.outputs.commit }}'
-          path: assets
+          name: ${{ needs.build.outputs.source_artifact }}
+          path: src            # → src/<source tarball>
+      - name: Guard — require all 8 binaries for real releases
+        if: startsWith(github.ref_name, 'v')
+        shell: bash
+        run: |
+          # F6: count per-artifact dirs (one dir per triple). With merge-multiple this
+          # would flatten to loose files and miscount; without it, each triple is a dir.
+          count=$(find bin -mindepth 1 -maxdepth 1 -type d -name 'binaries-*' | wc -l | tr -d ' ')
+          echo "Found $count binaries-* artifact dirs:"; ls -la bin || true
+          if [ "$count" -ne 8 ]; then
+            echo "::error::real v* release requires 8 binaries-* artifacts, found $count"
+            exit 1
+          fi
+      - name: Assemble release assets
+        shell: bash
+        run: |
+          # Flatten the per-triple dirs + source tarball into one assets/ dir for upload.
+          mkdir -p assets
+          find bin -mindepth 2 -type f -exec cp -t assets {} +
+          cp src/* assets/
+          echo "Release assets:"; ls -la assets
       - name: Create or update release
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.setup.outputs.tag }}
-          COMMIT: ${{ needs.setup.outputs.commit }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_id) }}
+          COMMIT: ${{ needs.build.outputs.commit }}
         run: |
           notes="Release build for commit https://github.com/${{ github.repository }}/commit/$COMMIT"
           if gh release view "$TAG" --repo '${{ github.repository }}' >/dev/null 2>&1; then
