@@ -17,7 +17,7 @@ jobs:
     with:
       source_repo: ${{ github.repository }}        # elijahr/Nim
       ref: ${{ github.event.inputs.ref || github.sha }}
-      matrix_subset: '["x86_64-apple-darwin14","arm64-apple-darwin24.2.0"]'   # Tranche 3: both macOS triples (widened per tranche)
+      matrix_subset: '["x86_64-w64-mingw32","i686-w64-mingw32"]'   # Tranche 4: both Windows triples (widened per tranche)
     secrets: inherit
 
   release:
