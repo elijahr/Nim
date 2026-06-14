@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    uses: elijahr/nightlies/.github/workflows/build.yml@validation   # validation: branch ref; pin to SHA in Task 13
+    uses: elijahr/nightlies/.github/workflows/build.yml@848a1853ab7415f7ed27e7ba1f0a35a3451af472   # pinned: nightlies master @848a1853 (reusable all-8 build, validated Task 12)
     with:
       source_repo: ${{ github.repository }}        # elijahr/Nim
       ref: ${{ github.event.inputs.ref || github.sha }}
