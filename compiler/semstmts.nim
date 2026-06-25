@@ -2272,7 +2272,7 @@ proc semOverride(c: PContext, s: PSym, n: PNode) =
       while true:
         incl(obj, tfHasAsgn)
         if obj.kind == tyGenericBody: obj = obj.skipModifier
-        elif obj.kind == tyGenericInvocation: obj = obj.genericHead
+        elif obj.kind in {tyGenericInvocation, tyGenericInst}: obj = obj.genericHead
         else: break
       var objB = t[2]
       while true:
